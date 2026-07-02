@@ -1,0 +1,25 @@
+{
+	"name": "fb2-reader",
+	"version": "0.1.0",
+	"description": "Read FictionBook (.fb2) files directly in Obsidian.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+	},
+	"keywords": [
+		"obsidian",
+		"fb2"
+	],
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"esbuild": "^0.21.0",
+		"obsidian": "latest",
+		"tslib": "^2.6.0",
+		"typescript": "^5.4.0"
+	},
+	"dependencies": {
+		"fflate": "^0.8.3"
+	}
+}

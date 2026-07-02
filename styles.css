@@ -1,0 +1,215 @@
+.fb2-reader {
+	overflow-y: auto;
+}
+
+/* Forced color schemes for the reading area. Obsidian theme variables are
+   overridden locally so nested elements pick up matching colors. */
+body.fb2-theme-dark .fb2-reader {
+	--background-primary: #1e1e22;
+	--background-secondary: #1e1e22;
+	background-color: #1e1e22 !important;
+	color: #d6d6d6;
+	--text-normal: #d6d6d6;
+	--text-muted: #9c9ca4;
+	--text-error: #ff6b6b;
+	--link-color: #7ab8f5;
+	--link-external-color: #7ab8f5;
+	--background-modifier-border: #3a3a42;
+	--background-modifier-hover: rgba(255, 255, 255, 0.08);
+}
+
+body.fb2-theme-light .fb2-reader {
+	--background-primary: #fbfbf8;
+	--background-secondary: #fbfbf8;
+	background-color: #fbfbf8 !important;
+	color: #232323;
+	--text-normal: #232323;
+	--text-muted: #6c6c68;
+	--text-error: #c0392b;
+	--link-color: #1c6dbb;
+	--link-external-color: #1c6dbb;
+	--background-modifier-border: #d9d9d2;
+	--background-modifier-hover: rgba(0, 0, 0, 0.06);
+}
+
+body.fb2-theme-sepia .fb2-reader {
+	--background-primary: #f4ecd8;
+	--background-secondary: #f4ecd8;
+	background-color: #f4ecd8 !important;
+	color: #5b4636;
+	--text-normal: #5b4636;
+	--text-muted: #8a7a62;
+	--text-error: #a83a2a;
+	--link-color: #7b5233;
+	--link-external-color: #7b5233;
+	--background-modifier-border: #d8cbb0;
+	--background-modifier-hover: rgba(91, 70, 54, 0.08);
+}
+
+body.fb2-theme-dark .fb2-reader a,
+body.fb2-theme-light .fb2-reader a,
+body.fb2-theme-sepia .fb2-reader a {
+	color: var(--link-color);
+}
+
+.fb2-book {
+	max-width: 44em;
+	margin: 0 auto;
+	padding: 2em 1.5em 4em;
+	font-family: var(--fb2-font-family, inherit);
+	font-size: var(--fb2-font-size, 1.05em);
+	line-height: var(--fb2-line-height, 1.65);
+	color: var(--fb2-text-color, inherit);
+}
+
+.fb2-title-page {
+	text-align: center;
+	margin-bottom: 3em;
+}
+
+.fb2-cover {
+	max-width: 60%;
+	max-height: 60vh;
+	margin: 0 auto 1.5em;
+	display: block;
+	border-radius: 4px;
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+}
+
+.fb2-book-title {
+	margin-bottom: 0.2em;
+}
+
+.fb2-authors {
+	color: var(--text-muted);
+	font-size: 1.1em;
+	margin-top: 0;
+}
+
+.fb2-annotation {
+	font-style: italic;
+	color: var(--text-muted);
+	text-align: left;
+	margin-top: 1.5em;
+}
+
+.fb2-title {
+	text-align: center;
+	margin-top: 2em;
+}
+
+.fb2-p {
+	text-indent: 1.5em;
+	margin: 0.3em 0;
+	text-align: justify;
+	hyphens: auto;
+}
+
+.fb2-empty-line {
+	height: 1em;
+}
+
+.fb2-subtitle {
+	text-align: center;
+	font-weight: 600;
+	margin-top: 1.5em;
+}
+
+.fb2-epigraph {
+	margin: 1.5em 0 1.5em auto;
+	max-width: 70%;
+	font-style: italic;
+	color: var(--text-muted);
+}
+
+.fb2-epigraph .fb2-p {
+	text-indent: 0;
+	text-align: right;
+}
+
+.fb2-cite {
+	font-style: italic;
+}
+
+.fb2-poem {
+	margin: 1.5em auto;
+	width: fit-content;
+	max-width: 100%;
+}
+
+.fb2-stanza {
+	margin: 1em 0;
+}
+
+.fb2-verse {
+	margin: 0;
+	text-indent: 0;
+	text-align: left;
+}
+
+.fb2-text-author {
+	text-align: right;
+	font-style: italic;
+	text-indent: 0;
+}
+
+.fb2-image-block {
+	display: block;
+	max-width: 100%;
+	margin: 1.5em auto;
+}
+
+.fb2-image-inline {
+	max-height: 1.4em;
+	vertical-align: middle;
+}
+
+.fb2-table {
+	margin: 1.5em auto;
+	border-collapse: collapse;
+}
+
+.fb2-table td,
+.fb2-table th {
+	border: 1px solid var(--background-modifier-border);
+	padding: 0.3em 0.7em;
+}
+
+.fb2-notes {
+	margin-top: 3em;
+	font-size: 0.9em;
+	color: var(--text-muted);
+}
+
+.fb2-toc {
+	padding: 0.5em;
+}
+
+.fb2-toc-book {
+	font-weight: 600;
+	margin-bottom: 0.6em;
+	padding: 0 6px;
+}
+
+.fb2-toc-item {
+	cursor: pointer;
+	padding: 3px 6px;
+	border-radius: 4px;
+	font-size: 0.9em;
+	color: var(--text-normal);
+}
+
+.fb2-toc-item:hover {
+	background: var(--background-modifier-hover);
+}
+
+.fb2-toc-empty {
+	color: var(--text-muted);
+	padding: 0 6px;
+}
+
+.fb2-error {
+	color: var(--text-error);
+	text-align: center;
+	margin-top: 3em;
+}
