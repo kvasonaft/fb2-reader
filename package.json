@@ -4,8 +4,8 @@
 	"description": "Read FictionBook (.fb2) files directly in Obsidian.",
 	"main": "main.js",
 	"scripts": {
-		"dev": "node esbuild.config.mjs",
-		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+		"dev": "esbuild src/main.ts --bundle --external:obsidian --format=cjs --target=es2021 --outfile=main.js --sourcemap=inline --watch",
+		"build": "tsc -noEmit -skipLibCheck && esbuild src/main.ts --bundle --external:obsidian --format=cjs --target=es2021 --outfile=main.js"
 	},
 	"keywords": [
 		"obsidian",

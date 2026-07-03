@@ -15,6 +15,10 @@ const VIEW_TYPE_FB2 = "fb2-reader-view";
 const VIEW_TYPE_TOC = "fb2-reader-toc";
 const XLINK_NS = "http://www.w3.org/1999/xlink";
 
+// ---------------------------------------------------------------------------
+// Types and defaults
+// ---------------------------------------------------------------------------
+
 interface TocItem {
 	text: string;
 	depth: number;
@@ -34,6 +38,11 @@ interface Fb2Settings {
 	lineHeight: number;
 	theme: Fb2Theme;
 	textColor: string;
+}
+
+interface Fb2Data {
+	positions: Record<string, ReadingPosition>;
+	settings: Fb2Settings;
 }
 
 const DEFAULT_SETTINGS: Fb2Settings = {
@@ -57,10 +66,42 @@ const TEXT_COLORS: Record<string, string> = {
 	"#5b4636": "Sepia brown",
 };
 
-interface Fb2Data {
-	positions: Record<string, ReadingPosition>;
-	settings: Fb2Settings;
-}
+// ---------------------------------------------------------------------------
+// FB2 tag → HTML mapping tables
+// ---------------------------------------------------------------------------
+
+// Block-level FB2 tags that become a plain container; children are rendered
+// inside it as blocks. Only <section> increases the nesting depth.
+const BLOCK_CONTAINERS: Record<string, { tag: "div" | "blockquote"; cls: string }> = {
+	section: { tag: "div", cls: "fb2-section" },
+	epigraph: { tag: "div", cls: "fb2-epigraph" },
+	poem: { tag: "div", cls: "fb2-poem" },
+	stanza: { tag: "div", cls: "fb2-stanza" },
+	annotation: { tag: "div", cls: "fb2-annotation" },
+	cite: { tag: "blockquote", cls: "fb2-cite" },
+};
+
+// Block-level FB2 tags that become a paragraph with inline content.
+const BLOCK_PARAGRAPHS: Record<string, string> = {
+	p: "fb2-p",
+	subtitle: "fb2-subtitle",
+	v: "fb2-verse",
+	"text-author": "fb2-text-author",
+};
+
+// Inline FB2 tags that map directly to an HTML tag.
+const INLINE_TAGS: Record<string, keyof HTMLElementTagNameMap> = {
+	strong: "strong",
+	emphasis: "em",
+	strikethrough: "s",
+	sub: "sub",
+	sup: "sup",
+	code: "code",
+};
+
+// ---------------------------------------------------------------------------
+// File decoding helpers
+// ---------------------------------------------------------------------------
 
 function detectEncoding(buf: ArrayBuffer): string {
 	const bytes = new Uint8Array(buf.slice(0, 4));
@@ -72,9 +113,8 @@ function detectEncoding(buf: ArrayBuffer): string {
 }
 
 function decodeFb2(buf: ArrayBuffer): string {
-	const encoding = detectEncoding(buf);
 	try {
-		return new TextDecoder(encoding).decode(buf);
+		return new TextDecoder(detectEncoding(buf)).decode(buf);
 	} catch {
 		return new TextDecoder("utf-8").decode(buf);
 	}
@@ -102,14 +142,12 @@ let cachedSystemFonts: string[] | null = null;
 
 async function getSystemFonts(): Promise<string[]> {
 	if (cachedSystemFonts) return cachedSystemFonts;
+	const queryLocalFonts = (
+		window as { queryLocalFonts?: () => Promise<{ family: string }[]> }
+	).queryLocalFonts;
+	if (!queryLocalFonts) return [];
 	try {
-		const query = (
-			window as unknown as {
-				queryLocalFonts?: () => Promise<{ family: string }[]>;
-			}
-		).queryLocalFonts;
-		if (!query) return [];
-		const fonts: { family: string }[] = await query.call(window);
+		const fonts: { family: string }[] = await queryLocalFonts.call(window);
 		const families = Array.from(new Set(fonts.map((f) => f.family))).sort(
 			(a, b) => a.localeCompare(b)
 		);
@@ -128,6 +166,16 @@ function getHref(el: Element): string | null {
 		el.getAttribute("href")
 	);
 }
+
+// Copy the FB2 "id" attribute so internal links can find this element later.
+function copyId(from: Element, to: HTMLElement) {
+	const id = from.getAttribute("id");
+	if (id) to.setAttribute("data-fb2-id", id);
+}
+
+// ---------------------------------------------------------------------------
+// The reader view: renders one FB2 book
+// ---------------------------------------------------------------------------
 
 class Fb2View extends FileView {
 	tocItems: TocItem[] = [];
@@ -266,20 +314,18 @@ class Fb2View extends FileView {
 		this.collectToc = false;
 		if (titleInfo) this.renderTitleInfo(titleInfo, root);
 
-		const bodies = Array.from(doc.querySelectorAll("FictionBook > body"));
-		for (const body of bodies) {
+		for (const body of Array.from(doc.querySelectorAll("FictionBook > body"))) {
 			const isNotes = body.getAttribute("name") === "notes";
 			this.collectToc = !isNotes;
 			const bodyEl = root.createDiv({
 				cls: isNotes ? "fb2-body fb2-notes" : "fb2-body",
 			});
 			if (isNotes) bodyEl.createEl("hr");
-			for (const child of Array.from(body.children)) {
-				this.renderBlock(child, bodyEl, 1);
-			}
+			this.renderBlockChildren(body, bodyEl, 1);
 		}
 		this.collectToc = false;
 
+		// One click handler for all internal links (notes, cross-references).
 		root.addEventListener("click", (evt) => {
 			const link = (evt.target as HTMLElement).closest("a[data-fb2-target]");
 			if (!link) return;
@@ -318,112 +364,69 @@ class Fb2View extends FileView {
 
 		const annotation = info.querySelector("annotation");
 		if (annotation) {
-			const annEl = header.createDiv({ cls: "fb2-annotation" });
-			for (const child of Array.from(annotation.children)) {
-				this.renderBlock(child, annEl, 1);
-			}
+			this.renderBlockChildren(
+				annotation,
+				header.createDiv({ cls: "fb2-annotation" }),
+				1
+			);
+		}
+	}
+
+	private renderBlockChildren(el: Element, parent: HTMLElement, depth: number) {
+		for (const child of Array.from(el.children)) {
+			this.renderBlock(child, parent, depth);
 		}
 	}
 
 	private renderBlock(el: Element, parent: HTMLElement, depth: number) {
 		const tag = el.localName;
+
+		const container = BLOCK_CONTAINERS[tag];
+		if (container) {
+			const box = parent.createEl(container.tag, { cls: container.cls });
+			copyId(el, box);
+			this.renderBlockChildren(
+				el,
+				box,
+				tag === "section" ? depth + 1 : depth
+			);
+			return;
+		}
+
+		const paragraphCls = BLOCK_PARAGRAPHS[tag];
+		if (paragraphCls) {
+			const p = parent.createEl("p", { cls: paragraphCls });
+			copyId(el, p);
+			this.renderInlineChildren(el, p);
+			return;
+		}
+
 		switch (tag) {
-			case "section": {
-				const section = parent.createDiv({ cls: "fb2-section" });
-				const id = el.getAttribute("id");
-				if (id) section.setAttribute("data-fb2-id", id);
-				for (const child of Array.from(el.children)) {
-					this.renderBlock(child, section, depth + 1);
-				}
-				break;
-			}
 			case "title": {
 				const level = Math.min(depth + 1, 6);
-				const heading = parent.createEl(`h${level}` as keyof HTMLElementTagNameMap, {
-					cls: "fb2-title",
-				});
+				const heading = parent.createEl(
+					`h${level}` as keyof HTMLElementTagNameMap,
+					{ cls: "fb2-title" }
+				);
+				const tocText: string[] = [];
 				for (const child of Array.from(el.children)) {
-					if (child.localName === "p") {
-						if (heading.childNodes.length) heading.createEl("br");
-						this.renderInlineChildren(child, heading);
-					}
+					if (child.localName !== "p") continue;
+					if (heading.childNodes.length) heading.createEl("br");
+					this.renderInlineChildren(child, heading);
+					const text = child.textContent?.trim();
+					if (text) tocText.push(text);
 				}
 				if (this.collectToc) {
-					const text = Array.from(el.children)
-						.filter((c) => c.localName === "p")
-						.map((c) => c.textContent?.trim() ?? "")
-						.filter(Boolean)
-						.join(" ");
-					this.tocItems.push({ text, depth, el: heading });
+					this.tocItems.push({ text: tocText.join(" "), depth, el: heading });
 				}
-				break;
-			}
-			case "p": {
-				const p = parent.createEl("p", { cls: "fb2-p" });
-				const id = el.getAttribute("id");
-				if (id) p.setAttribute("data-fb2-id", id);
-				this.renderInlineChildren(el, p);
 				break;
 			}
 			case "empty-line":
 				parent.createDiv({ cls: "fb2-empty-line" });
 				break;
-			case "subtitle":
-				this.renderInlineChildren(
-					el,
-					parent.createEl("p", { cls: "fb2-subtitle" })
-				);
-				break;
 			case "image":
 				this.renderImage(el, parent, "fb2-image-block");
 				break;
-			case "epigraph": {
-				const ep = parent.createDiv({ cls: "fb2-epigraph" });
-				for (const child of Array.from(el.children)) {
-					this.renderBlock(child, ep, depth);
-				}
-				break;
-			}
-			case "cite": {
-				const cite = parent.createEl("blockquote", { cls: "fb2-cite" });
-				for (const child of Array.from(el.children)) {
-					this.renderBlock(child, cite, depth);
-				}
-				break;
-			}
-			case "poem": {
-				const poem = parent.createDiv({ cls: "fb2-poem" });
-				for (const child of Array.from(el.children)) {
-					this.renderBlock(child, poem, depth);
-				}
-				break;
-			}
-			case "stanza": {
-				const stanza = parent.createDiv({ cls: "fb2-stanza" });
-				for (const child of Array.from(el.children)) {
-					this.renderBlock(child, stanza, depth);
-				}
-				break;
-			}
-			case "v":
-				this.renderInlineChildren(
-					el,
-					parent.createEl("p", { cls: "fb2-verse" })
-				);
-				break;
-			case "text-author":
-				this.renderInlineChildren(
-					el,
-					parent.createEl("p", { cls: "fb2-text-author" })
-				);
-				break;
-			case "annotation": {
-				const ann = parent.createDiv({ cls: "fb2-annotation" });
-				for (const child of Array.from(el.children)) {
-					this.renderBlock(child, ann, depth);
-				}
-				break;
-			}
 			case "table": {
 				const table = parent.createEl("table", { cls: "fb2-table" });
 				for (const tr of Array.from(el.querySelectorAll("tr"))) {
@@ -435,12 +438,9 @@ class Fb2View extends FileView {
 				}
 				break;
 			}
-			default: {
+			default:
 				// Unknown container: recurse so nested known blocks still render.
-				for (const child of Array.from(el.children)) {
-					this.renderBlock(child, parent, depth);
-				}
-			}
+				this.renderBlockChildren(el, parent, depth);
 		}
 	}
 
@@ -457,25 +457,15 @@ class Fb2View extends FileView {
 		}
 		if (node.nodeType !== Node.ELEMENT_NODE) return;
 		const el = node as Element;
-		switch (el.localName) {
-			case "strong":
-				this.renderInlineChildren(el, parent.createEl("strong"));
-				break;
-			case "emphasis":
-				this.renderInlineChildren(el, parent.createEl("em"));
-				break;
-			case "strikethrough":
-				this.renderInlineChildren(el, parent.createEl("s"));
-				break;
-			case "sub":
-				this.renderInlineChildren(el, parent.createEl("sub"));
-				break;
-			case "sup":
-				this.renderInlineChildren(el, parent.createEl("sup"));
-				break;
-			case "code":
-				this.renderInlineChildren(el, parent.createEl("code"));
-				break;
+		const tag = el.localName;
+
+		const htmlTag = INLINE_TAGS[tag];
+		if (htmlTag) {
+			this.renderInlineChildren(el, parent.createEl(htmlTag));
+			return;
+		}
+
+		switch (tag) {
 			case "image":
 				this.renderImage(el, parent, "fb2-image-inline");
 				break;
@@ -509,6 +499,10 @@ class Fb2View extends FileView {
 		if (alt) img.alt = alt;
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The table-of-contents side panel
+// ---------------------------------------------------------------------------
 
 class Fb2TocView extends ItemView {
 	private source: Fb2View | null = null;
@@ -568,6 +562,10 @@ class Fb2TocView extends ItemView {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The plugin: wires everything together, stores settings and positions
+// ---------------------------------------------------------------------------
+
 export default class Fb2ReaderPlugin extends Plugin {
 	private data: Fb2Data = { positions: {}, settings: { ...DEFAULT_SETTINGS } };
 	private saveDataDebounced = debounce(() => this.saveData(this.data), 2000, true);
@@ -586,13 +584,15 @@ export default class Fb2ReaderPlugin extends Plugin {
 		this.addSettingTab(new Fb2SettingTab(this.app, this));
 
 		this.addRibbonIcon("book-open-text", "FB2 Reader settings", () => {
-			const setting = (
-				this.app as unknown as {
+			// "setting" is an undocumented part of the Obsidian API, so the
+			// App type has to be widened by hand.
+			const appSetting = (
+				this.app as App & {
 					setting: { open(): void; openTabById(id: string): void };
 				}
 			).setting;
-			setting.open();
-			setting.openTabById(this.manifest.id);
+			appSetting.open();
+			appSetting.openTabById(this.manifest.id);
 		});
 
 		this.addCommand({
@@ -702,18 +702,48 @@ export default class Fb2ReaderPlugin extends Plugin {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The settings tab
+// ---------------------------------------------------------------------------
+
 class Fb2SettingTab extends PluginSettingTab {
 	private plugin: Fb2ReaderPlugin;
+	private renderToken = 0;
 
 	constructor(app: App, plugin: Fb2ReaderPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
-	private renderToken = 0;
-
 	display(): void {
 		void this.render();
+	}
+
+	// Adds a numeric text field that only saves values inside [min, max].
+	private addNumberSetting(
+		name: string,
+		desc: string,
+		min: number,
+		max: number,
+		step: string,
+		getValue: () => number,
+		setValue: (n: number) => void
+	) {
+		new Setting(this.containerEl)
+			.setName(name)
+			.setDesc(desc)
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text.inputEl.min = String(min);
+				text.inputEl.max = String(max);
+				text.inputEl.step = step;
+				text.setValue(String(getValue())).onChange((value) => {
+					const n = Number(value);
+					if (!Number.isFinite(n) || n < min || n > max) return;
+					setValue(n);
+					this.plugin.saveSettings();
+				});
+			});
 	}
 
 	private async render(): Promise<void> {
@@ -789,40 +819,25 @@ class Fb2SettingTab extends PluginSettingTab {
 				);
 		}
 
-		new Setting(containerEl)
-			.setName("Font size")
-			.setDesc("Book text size in pixels (8–72).")
-			.addText((text) => {
-				text.inputEl.type = "number";
-				text.inputEl.min = "8";
-				text.inputEl.max = "72";
-				text
-					.setValue(String(this.plugin.fb2Settings.fontSize))
-					.onChange((value) => {
-						const n = Number(value);
-						if (!Number.isFinite(n) || n < 8 || n > 72) return;
-						this.plugin.fb2Settings.fontSize = n;
-						this.plugin.saveSettings();
-					});
-			});
+		this.addNumberSetting(
+			"Font size",
+			"Book text size in pixels (8–72).",
+			8,
+			72,
+			"1",
+			() => this.plugin.fb2Settings.fontSize,
+			(n) => (this.plugin.fb2Settings.fontSize = n)
+		);
 
-		new Setting(containerEl)
-			.setName("Line height")
-			.setDesc("Line spacing multiplier (1–3), e.g. 1.65.")
-			.addText((text) => {
-				text.inputEl.type = "number";
-				text.inputEl.min = "1";
-				text.inputEl.max = "3";
-				text.inputEl.step = "0.05";
-				text
-					.setValue(String(this.plugin.fb2Settings.lineHeight))
-					.onChange((value) => {
-						const n = Number(value);
-						if (!Number.isFinite(n) || n < 1 || n > 3) return;
-						this.plugin.fb2Settings.lineHeight = n;
-						this.plugin.saveSettings();
-					});
-			});
+		this.addNumberSetting(
+			"Line height",
+			"Line spacing multiplier (1–3), e.g. 1.65.",
+			1,
+			3,
+			"0.05",
+			() => this.plugin.fb2Settings.lineHeight,
+			(n) => (this.plugin.fb2Settings.lineHeight = n)
+		);
 
 		new Setting(containerEl).addButton((btn) =>
 			btn.setButtonText("Reset to defaults").onClick(() => {

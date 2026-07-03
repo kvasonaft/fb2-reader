@@ -1,0 +1,8 @@
+# Installed dependencies — recreated with `npm install`
+node_modules/
+
+# Build output — recreated with `npm run build`
+main.js
+
+# Local Claude Code settings
+.claude/
