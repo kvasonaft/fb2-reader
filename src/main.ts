@@ -25,6 +25,7 @@ import {
 	TFile,
 	WorkspaceLeaf,
 } from "obsidian";
+import type { SettingDefinitionItem } from "obsidian";
 
 // Internal identifiers of our two view types.
 const VIEW_TYPE_FB2 = "fb2-reader-view";
@@ -372,7 +373,9 @@ class Fb2View extends FileView {
 		const pos = this.plugin.getPosition(path);
 		if (!pos || pos.index <= 0) return;
 		// By the next animation frame the browser has laid out all elements.
-		requestAnimationFrame(() => {
+		// contentEl.win is the window owning this view — the correct one
+		// when the reader lives in a popout window.
+		this.contentEl.win.requestAnimationFrame(() => {
 			const blocks = this.getScrollBlocks();
 			const target = blocks[Math.min(pos.index, blocks.length - 1)];
 			target?.scrollIntoView({ block: "start" });
@@ -490,7 +493,9 @@ class Fb2View extends FileView {
 		const deadline = performance.now() + 12;
 		while (this.renderQueue.length) {
 			if (performance.now() > deadline) {
-				requestAnimationFrame(() => {
+				// contentEl.win: schedule on the window owning this view,
+				// which matters when the reader lives in a popout window.
+				this.contentEl.win.requestAnimationFrame(() => {
 					// A new render (or file close) may have started meanwhile.
 					if (pass === this.renderPass) this.pumpRenderQueue(pass);
 				});
@@ -802,7 +807,7 @@ export default class Fb2ReaderPlugin extends Plugin {
 		// Load persisted data (data.json). Object.assign layers the stored
 		// settings over the defaults, so fields added in a plugin update
 		// still get values.
-		const stored = (await this.loadData()) ?? {};
+		const stored = ((await this.loadData()) ?? {}) as Partial<Fb2Data>;
 		this.data = {
 			positions: stored.positions ?? {},
 			settings: Object.assign({}, DEFAULT_SETTINGS, stored.settings),
@@ -961,20 +966,166 @@ export default class Fb2ReaderPlugin extends Plugin {
 // ---------------------------------------------------------------------------
 // Fb2SettingTab — the settings tab
 //
-// Obsidian calls display() every time the user opens the plugin settings.
-// Each control's onChange updates plugin.fb2Settings and calls
-// plugin.saveSettings(), so changes apply immediately.
+// On Obsidian 1.13+ the tab is rendered declaratively from
+// getSettingDefinitions(), which also feeds the settings search.
+// The imperative display()/render() pair below is the fallback for
+// older versions and is not called when definitions are provided.
 // ---------------------------------------------------------------------------
 
 class Fb2SettingTab extends PluginSettingTab {
 	private plugin: Fb2ReaderPlugin;
 	// Render counter — guards against a race (see the comment in render).
 	private renderToken = 0;
+	// The system font list is fetched once, asynchronously; the tab
+	// re-renders when it arrives (see fontDefinition).
+	private fontsRequested = false;
 
 	constructor(app: App, plugin: Fb2ReaderPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
+
+	// --- Declarative settings (Obsidian 1.13+) ---
+
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			{
+				name: "Theme",
+				desc: "Color scheme for the reading area.",
+				control: {
+					type: "dropdown",
+					key: "theme",
+					defaultValue: "",
+					options: {
+						"": "Same as Obsidian",
+						light: "Light",
+						dark: "Dark",
+						sepia: "Sepia",
+					},
+				},
+			},
+			{
+				name: "Text color",
+				desc: "Color of the main book text. Default follows the theme.",
+				control: {
+					type: "dropdown",
+					key: "textColor",
+					defaultValue: "",
+					options: this.textColorOptions(),
+				},
+			},
+			this.fontDefinition(),
+			{
+				name: "Font size",
+				desc: "Book text size in pixels (8–72).",
+				control: {
+					type: "number",
+					key: "fontSize",
+					defaultValue: DEFAULT_SETTINGS.fontSize,
+					min: 8,
+					max: 72,
+					step: 1,
+					validate: (v) =>
+						Number.isFinite(v) && v >= 8 && v <= 72
+							? undefined
+							: "Enter a number between 8 and 72.",
+				},
+			},
+			{
+				name: "Line height",
+				desc: "Line spacing multiplier (1–3), e.g. 1.65.",
+				control: {
+					type: "number",
+					key: "lineHeight",
+					defaultValue: DEFAULT_SETTINGS.lineHeight,
+					min: 1,
+					max: 3,
+					step: 0.05,
+					validate: (v) =>
+						Number.isFinite(v) && v >= 1 && v <= 3
+							? undefined
+							: "Enter a number between 1 and 3.",
+				},
+			},
+			{
+				name: "Drop caps",
+				desc: "Large initial letter at the first paragraph of each chapter.",
+				control: { type: "toggle", key: "dropCaps", defaultValue: false },
+			},
+			{
+				name: "Reset to defaults",
+				action: () => {
+					Object.assign(this.plugin.fb2Settings, DEFAULT_SETTINGS);
+					this.plugin.saveSettings();
+					this.update(); // re-render with the restored values
+				},
+			},
+		];
+	}
+
+	getControlValue(key: string): unknown {
+		return this.plugin.fb2Settings[key as keyof Fb2Settings];
+	}
+
+	setControlValue(key: string, value: unknown): void {
+		if (typeof value === "string") value = value.trim();
+		(this.plugin.fb2Settings as unknown as Record<string, unknown>)[key] =
+			value;
+		this.plugin.saveSettings();
+	}
+
+	// Text color presets, plus the saved color as an extra option when it is
+	// not in the list (e.g. hand-edited in data.json), so the selection
+	// doesn't get lost.
+	private textColorOptions(): Record<string, string> {
+		const options: Record<string, string> = {};
+		const current = this.plugin.fb2Settings.textColor;
+		if (current && !(current in TEXT_COLORS)) options[current] = current;
+		return Object.assign(options, TEXT_COLORS);
+	}
+
+	// Font: a dropdown when the system font list is available, otherwise
+	// (no permission, unsupported platform) a plain text field.
+	// getSettingDefinitions is synchronous, so the first call kicks off the
+	// async font query and re-renders the tab once the list arrives.
+	private fontDefinition(): SettingDefinitionItem {
+		const fonts = cachedSystemFonts;
+		if (!fonts) {
+			if (!this.fontsRequested) {
+				this.fontsRequested = true;
+				void getSystemFonts().then((families) => {
+					if (families.length) this.update();
+				});
+			}
+			return {
+				name: "Font",
+				desc:
+					"Font family for book text. " +
+					"Leave empty to use the Obsidian theme font.",
+				control: {
+					type: "text",
+					key: "fontFamily",
+					placeholder: "Same as Obsidian",
+				},
+			};
+		}
+		const options: Record<string, string> = { "": "Same as Obsidian" };
+		const current = this.plugin.fb2Settings.fontFamily;
+		if (current && !fonts.includes(current)) options[current] = current;
+		for (const family of fonts) options[family] = family;
+		return {
+			name: "Font",
+			desc: "Font used for book text.",
+			control: {
+				type: "dropdown",
+				key: "fontFamily",
+				defaultValue: "",
+				options,
+			},
+		};
+	}
+
+	// --- Imperative fallback for Obsidian older than 1.13 ---
 
 	display(): void {
 		// render is async (it awaits the font list); fire and forget.

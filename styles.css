@@ -7,7 +7,7 @@
 body.fb2-theme-dark .fb2-reader {
 	--background-primary: #1e1e22;
 	--background-secondary: #1e1e22;
-	background-color: #1e1e22 !important;
+	background-color: #1e1e22;
 	color: #d6d6d6;
 	--text-normal: #d6d6d6;
 	--text-muted: #9c9ca4;
@@ -21,7 +21,7 @@ body.fb2-theme-dark .fb2-reader {
 body.fb2-theme-light .fb2-reader {
 	--background-primary: #fbfbf8;
 	--background-secondary: #fbfbf8;
-	background-color: #fbfbf8 !important;
+	background-color: #fbfbf8;
 	color: #232323;
 	--text-normal: #232323;
 	--text-muted: #6c6c68;
@@ -35,7 +35,7 @@ body.fb2-theme-light .fb2-reader {
 body.fb2-theme-sepia .fb2-reader {
 	--background-primary: #f4ecd8;
 	--background-secondary: #f4ecd8;
-	background-color: #f4ecd8 !important;
+	background-color: #f4ecd8;
 	color: #5b4636;
 	--text-normal: #5b4636;
 	--text-muted: #8a7a62;
