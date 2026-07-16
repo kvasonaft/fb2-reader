@@ -1,7 +1,7 @@
 {
 	"name": "fiction-book-reader",
 	"version": "0.1.0",
-	"description": "Read FictionBook (.fb2) files directly in Obsidian.",
+	"description": "Read FictionBook (.fb2) files as formatted books with chapters, footnotes, images, and remembered reading positions.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "esbuild src/main.ts --bundle --external:obsidian --format=cjs --target=es2021 --outfile=main.js --sourcemap=inline --watch",
