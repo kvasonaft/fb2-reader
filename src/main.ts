@@ -778,7 +778,7 @@ class Fb2TocView extends ItemView {
 			row.addEventListener("click", () => {
 				const src = this.source;
 				if (!src) return;
-				this.app.workspace.revealLeaf(src.leaf);
+				void this.app.workspace.revealLeaf(src.leaf);
 				item.el.scrollIntoView({ behavior: "smooth", block: "start" });
 			});
 		}
@@ -952,7 +952,7 @@ export default class Fb2ReaderPlugin extends Plugin {
 			await right.setViewState({ type: VIEW_TYPE_TOC, active: true });
 			leaf = right;
 		}
-		this.app.workspace.revealLeaf(leaf);
+		await this.app.workspace.revealLeaf(leaf);
 		const active = this.app.workspace.getActiveViewOfType(Fb2View);
 		if (active) this.updateToc(active);
 	}
