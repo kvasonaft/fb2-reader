@@ -25,7 +25,7 @@ Search for **FB2 Reader** in Settings → Community plugins (once the plugin is 
 ### Manual
 
 1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](../../releases/latest).
-2. Copy them into `<your vault>/.obsidian/plugins/fb2-reader/`.
+2. Copy them into `<your vault>/.obsidian/plugins/fiction-book-reader/`.
 3. Reload Obsidian and enable **FB2 Reader** in Settings → Community plugins.
 
 ## Development

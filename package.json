@@ -1,5 +1,5 @@
 {
-	"name": "fb2-reader",
+	"name": "fiction-book-reader",
 	"version": "0.1.0",
 	"description": "Read FictionBook (.fb2) files directly in Obsidian.",
 	"main": "main.js",
