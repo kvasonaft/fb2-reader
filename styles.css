@@ -99,10 +99,18 @@ body.fb2-theme-sepia .fb2-reader a {
 }
 
 .fb2-p {
-	text-indent: 1.5em;
 	margin: 0.3em 0;
 	text-align: justify;
 	hyphens: auto;
+}
+
+/* First-line paragraph indent. Implemented as an inline spacer instead of
+   text-indent: compatibility checkers flag that property because of its
+   partially supported keyword values (hanging, each-line). */
+.fb2-p::before {
+	content: "";
+	display: inline-block;
+	width: 1.5em;
 }
 
 .fb2-empty-line {
@@ -123,8 +131,11 @@ body.fb2-theme-sepia .fb2-reader a {
 }
 
 .fb2-epigraph .fb2-p {
-	text-indent: 0;
 	text-align: right;
+}
+
+.fb2-epigraph .fb2-p::before {
+	display: none;
 }
 
 .fb2-cite {
@@ -143,14 +154,12 @@ body.fb2-theme-sepia .fb2-reader a {
 
 .fb2-verse {
 	margin: 0;
-	text-indent: 0;
 	text-align: left;
 }
 
 .fb2-text-author {
 	text-align: right;
 	font-style: italic;
-	text-indent: 0;
 }
 
 .fb2-image-block {
@@ -200,6 +209,13 @@ body.fb2-dropcaps .fb2-epigraph + .fb2-p::first-letter {
 	line-height: 0.85;
 	padding-right: 0.08em;
 	font-weight: 600;
+}
+
+/* A drop-cap paragraph starts flush left: no first-line indent spacer. */
+body.fb2-dropcaps .fb2-section > .fb2-p:first-child::before,
+body.fb2-dropcaps .fb2-title + .fb2-p::before,
+body.fb2-dropcaps .fb2-epigraph + .fb2-p::before {
+	display: none;
 }
 
 .fb2-toc {
