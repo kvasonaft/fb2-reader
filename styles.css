@@ -181,6 +181,27 @@ body.fb2-theme-sepia .fb2-reader a {
 	color: var(--text-muted);
 }
 
+/* "Return to text" link left at the destination of a footnote jump. */
+.fb2-backref {
+	display: inline-block;
+	margin-left: 0.5em;
+	text-decoration: none;
+	cursor: pointer;
+}
+
+/* Drop caps (enabled via the plugin setting): a large initial letter on the
+   opening paragraph of a chapter — the first paragraph of a section, or the
+   one right after the chapter title or epigraph. */
+body.fb2-dropcaps .fb2-section > .fb2-p:first-child::first-letter,
+body.fb2-dropcaps .fb2-title + .fb2-p::first-letter,
+body.fb2-dropcaps .fb2-epigraph + .fb2-p::first-letter {
+	float: left;
+	font-size: 3.2em;
+	line-height: 0.85;
+	padding-right: 0.08em;
+	font-weight: 600;
+}
+
 .fb2-toc {
 	padding: 0.5em;
 }

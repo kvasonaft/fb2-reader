@@ -1,25 +1,21 @@
 /*
- * Это ЕДИНСТВЕННЫЙ файл с кодом плагина. Всё, что делает FB2 Reader,
- * описано здесь. Подробное руководство для начинающих — в файле GUIDE.md
- * в корне репозитория: там объясняются и язык TypeScript, и устройство
- * плагинов Obsidian, и логика этого файла раздел за разделом.
+ * The entire plugin lives in this single file.
  *
- * Краткая карта файла (в порядке следования):
- *   1. Импорты — подключение готовых инструментов Obsidian и библиотеки fflate.
- *   2. Типы и настройки по умолчанию.
- *   3. Таблицы соответствий «тег FB2 → элемент HTML».
- *   4. Вспомогательные функции: определение кодировки, распаковка zip и т.п.
- *   5. Класс Fb2View — сама «читалка», превращает FB2-файл в страницу.
- *   6. Класс Fb2TocView — боковая панель с оглавлением.
- *   7. Класс Fb2ReaderPlugin — «дирижёр»: регистрирует читалку в Obsidian,
- *      хранит настройки и позиции чтения.
- *   8. Класс Fb2SettingTab — вкладка настроек плагина.
+ * File map (in order):
+ *   1. Imports.
+ *   2. Types and default settings.
+ *   3. Lookup tables mapping FB2 tags to HTML elements.
+ *   4. Helper functions: encoding detection and the like.
+ *   5. Fb2View — the reader itself, renders an FB2 file as a page.
+ *   6. Fb2TocView — the table-of-contents side panel.
+ *   7. Fb2ReaderPlugin — the conductor: registers the views,
+ *      stores settings and reading positions.
+ *   8. Fb2SettingTab — the plugin settings tab.
  */
 
-// «import» подключает код из других модулей. Из пакета "obsidian" мы берём
-// классы и функции, которые Obsidian предоставляет всем плагинам.
 import {
 	App,
+	base64ToArrayBuffer,
 	debounce,
 	FileView,
 	ItemView,
@@ -29,69 +25,70 @@ import {
 	TFile,
 	WorkspaceLeaf,
 } from "obsidian";
-// fflate — маленькая библиотека для распаковки zip-архивов
-// (FB2-книги часто распространяются в виде .fb2.zip).
-import { unzipSync } from "fflate";
 
-// «const» объявляет константу — значение, которое нельзя изменить.
-// Эти два идентификатора — внутренние имена наших видов (окон) в Obsidian.
+// Internal identifiers of our two view types.
 const VIEW_TYPE_FB2 = "fb2-reader-view";
 const VIEW_TYPE_TOC = "fb2-reader-toc";
-// Пространство имён XML для атрибутов вида xlink:href (ссылки внутри FB2).
+// XML namespace for xlink:href attributes (links inside FB2).
 const XLINK_NS = "http://www.w3.org/1999/xlink";
 
 // ---------------------------------------------------------------------------
-// Типы и значения по умолчанию
-//
-// «interface» — это описание ФОРМЫ объекта: какие у него поля и какого они
-// типа. Интерфейсы существуют только на этапе проверки кода (TypeScript)
-// и помогают ловить ошибки; в готовый main.js они не попадают.
+// Types and defaults
 // ---------------------------------------------------------------------------
 
-// Один пункт оглавления книги.
+// One entry in the book's table of contents.
 interface TocItem {
-	text: string; // текст заголовка главы
-	depth: number; // глубина вложенности (глава, подглава, ...)
-	el: HTMLElement; // сам HTML-элемент заголовка на странице — чтобы уметь к нему прокрутить
+	text: string; // chapter heading text
+	depth: number; // nesting depth (chapter, sub-chapter, ...)
+	el: HTMLElement; // the heading element on the page, so we can scroll to it
 }
 
-// Сохранённая позиция чтения в конкретной книге.
+// One deferred rendering unit: an FB2 block waiting to be turned into HTML.
+// Large books are rendered through a queue of these in per-frame slices,
+// so opening a book never freezes the UI.
+interface RenderJob {
+	el: Element; // the FB2 block to render
+	parent: HTMLElement; // where its HTML goes
+	depth: number; // section nesting depth (drives heading levels)
+	toc: boolean; // whether headings inside contribute TOC entries
+}
+
+// Saved reading position for one book.
 interface ReadingPosition {
-	index: number; // номер абзаца, с которого продолжить чтение
-	ts: number; // момент сохранения (нужен, чтобы удалять самые старые записи)
+	index: number; // index of the block to resume reading from
+	ts: number; // when it was saved (used to evict the oldest entries)
 }
 
-// Тема оформления: пустая строка означает «как в Obsidian».
+// Reader color theme; the empty string means "same as Obsidian".
 type Fb2Theme = "" | "light" | "dark" | "sepia";
 
-// Все настройки плагина, которые видит пользователь.
+// All user-facing plugin settings.
 interface Fb2Settings {
-	fontFamily: string; // шрифт ("" = как в Obsidian)
-	fontSize: number; // размер шрифта в пикселях
-	lineHeight: number; // межстрочный интервал (множитель)
-	theme: Fb2Theme; // цветовая тема читалки
-	textColor: string; // цвет текста ("" = по теме)
+	fontFamily: string; // font ("" = same as Obsidian)
+	fontSize: number; // font size in pixels
+	lineHeight: number; // line spacing multiplier
+	theme: Fb2Theme; // reader color theme
+	textColor: string; // text color ("" = follow the theme)
+	dropCaps: boolean; // large initial letter at chapter openings
 }
 
-// Всё, что плагин сохраняет на диск (Obsidian кладёт это в data.json).
+// Everything the plugin persists to disk (Obsidian stores it in data.json).
 interface Fb2Data {
-	positions: Record<string, ReadingPosition>; // путь к файлу → позиция чтения
+	positions: Record<string, ReadingPosition>; // file path → reading position
 	settings: Fb2Settings;
 }
 
-// Настройки по умолчанию — используются при первом запуске
-// и при нажатии кнопки "Reset to defaults".
+// Defaults used on first run and by the "Reset to defaults" button.
 const DEFAULT_SETTINGS: Fb2Settings = {
 	fontFamily: "",
 	fontSize: 17,
 	lineHeight: 1.65,
 	theme: "",
 	textColor: "",
+	dropCaps: false,
 };
 
-// Готовые варианты цвета текста для выпадающего списка в настройках:
-// «код цвета → подпись». Record<string, string> значит «объект, где
-// и ключи, и значения — строки».
+// Text color presets for the settings dropdown: "color code → label".
 const TEXT_COLORS: Record<string, string> = {
 	"": "Default (theme)",
 	"#000000": "Black",
@@ -106,133 +103,120 @@ const TEXT_COLORS: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Таблицы соответствий «тег FB2 → элемент HTML»
+// Lookup tables: FB2 tag → HTML element
 //
-// FB2 — это XML со своими тегами (<section>, <poem>, <emphasis>...).
-// Браузер и Obsidian понимают только HTML, поэтому каждый тег FB2 надо
-// «перевести». Большинство переводов тривиальны, и вместо длинной цепочки
-// условий мы описываем их тремя таблицами. Чтобы узнать, как отображается
-// тот или иной тег, достаточно найти его строчку здесь.
+// FB2 is XML with its own tags (<section>, <poem>, <emphasis>...), so every
+// tag has to be translated to HTML. Most translations are trivial, so instead
+// of a long chain of conditionals they are described by three tables.
 // ---------------------------------------------------------------------------
 
-// Блочные теги-«контейнеры»: превращаются в обёртку с CSS-классом,
-// а их содержимое обрабатывается дальше как блоки.
-// Только <section> увеличивает глубину вложенности (важно для заголовков).
+// Block-level container tags: rendered as a wrapper with a CSS class,
+// with their children processed as blocks.
+// Only <section> increases the nesting depth (which drives heading levels).
 const BLOCK_CONTAINERS: Record<string, { tag: "div" | "blockquote"; cls: string }> = {
-	section: { tag: "div", cls: "fb2-section" }, // глава книги
-	epigraph: { tag: "div", cls: "fb2-epigraph" }, // эпиграф
-	poem: { tag: "div", cls: "fb2-poem" }, // стихотворение
-	stanza: { tag: "div", cls: "fb2-stanza" }, // строфа
-	annotation: { tag: "div", cls: "fb2-annotation" }, // аннотация
-	cite: { tag: "blockquote", cls: "fb2-cite" }, // цитата
+	section: { tag: "div", cls: "fb2-section" }, // book chapter
+	epigraph: { tag: "div", cls: "fb2-epigraph" },
+	poem: { tag: "div", cls: "fb2-poem" },
+	stanza: { tag: "div", cls: "fb2-stanza" },
+	annotation: { tag: "div", cls: "fb2-annotation" },
+	cite: { tag: "blockquote", cls: "fb2-cite" }, // quotation
 };
 
-// Блочные теги, которые становятся абзацем <p> с указанным CSS-классом;
-// их содержимое — уже строчный текст (курсив, ссылки и т.п.).
+// Block-level tags rendered as a <p> with the given CSS class;
+// their content is inline (emphasis, links, etc.).
 const BLOCK_PARAGRAPHS: Record<string, string> = {
-	p: "fb2-p", // обычный абзац
-	subtitle: "fb2-subtitle", // подзаголовок
-	v: "fb2-verse", // строка стихотворения
-	"text-author": "fb2-text-author", // подпись автора под цитатой/эпиграфом
+	p: "fb2-p", // regular paragraph
+	subtitle: "fb2-subtitle",
+	v: "fb2-verse", // line of a poem
+	"text-author": "fb2-text-author", // author byline under a quote/epigraph
 };
 
-// Строчные теги (внутри абзаца), у которых есть прямой HTML-аналог.
+// Inline tags with a direct HTML counterpart.
 const INLINE_TAGS: Record<string, keyof HTMLElementTagNameMap> = {
-	strong: "strong", // жирный
-	emphasis: "em", // курсив
-	strikethrough: "s", // зачёркнутый
-	sub: "sub", // нижний индекс
-	sup: "sup", // верхний индекс
-	code: "code", // моноширинный (код)
+	strong: "strong",
+	emphasis: "em",
+	strikethrough: "s",
+	sub: "sub",
+	sup: "sup",
+	code: "code",
 };
 
 // ---------------------------------------------------------------------------
-// Вспомогательные функции: чтение и декодирование файла
+// Helpers: reading and decoding the file
 // ---------------------------------------------------------------------------
 
-// Файл с диска приходит в виде «сырых байт» (ArrayBuffer). Чтобы превратить
-// байты в текст, нужно знать кодировку. Эта функция пытается её угадать:
-// сначала по первым байтам (метка BOM у UTF-16), затем по объявлению
-// encoding="..." в первой строке XML. Если ничего не нашли — считаем UTF-8.
-function detectEncoding(buf: ArrayBuffer): string {
-	const bytes = new Uint8Array(buf.slice(0, 4));
-	if (bytes[0] === 0xff && bytes[1] === 0xfe) return "utf-16le";
-	if (bytes[0] === 0xfe && bytes[1] === 0xff) return "utf-16be";
-	// Читаем первые 512 байт как latin1 (это безопасно для любых байт)
-	// и ищем в них слово encoding="...".
+// Reads the encoding="..." declaration from the XML prolog, if any.
+// The first 512 bytes are decoded as latin1 (safe for arbitrary bytes).
+function declaredEncoding(buf: ArrayBuffer): string | null {
 	const head = new TextDecoder("latin1").decode(buf.slice(0, 512));
 	const m = head.match(/encoding=["']([\w-]+)["']/i);
-	return m ? m[1].toLowerCase() : "utf-8";
+	return m ? m[1].toLowerCase() : null;
 }
 
-// Превращает байты FB2-файла в текст. try/catch — «попробуй, а если
-// произойдёт ошибка (например, кодировка неизвестна браузеру) — сделай
-// запасной вариант»: декодируем как UTF-8.
+// Turns the bytes of an FB2 file into text. The encoding is decided
+// in three steps:
+//   1. A UTF-16 BOM is reliable — decode as UTF-16 right away.
+//   2. A declared non-UTF-8 encoding (windows-1251, koi8-r...) is used as is;
+//      TextDecoder supports the legacy single-byte encodings natively.
+//   3. Otherwise decode as strict UTF-8 (fatal: true): encoding declarations
+//      lie often, and strict mode turns silent mojibake into an exception —
+//      the trigger to fall back to windows-1251, the de facto FB2 default.
+// A leading BOM is stripped by TextDecoder itself (ignoreBOM defaults
+// to false).
 function decodeFb2(buf: ArrayBuffer): string {
+	const bom = new Uint8Array(buf.slice(0, 2));
+	if (bom[0] === 0xff && bom[1] === 0xfe) {
+		return new TextDecoder("utf-16le").decode(buf);
+	}
+	if (bom[0] === 0xfe && bom[1] === 0xff) {
+		return new TextDecoder("utf-16be").decode(buf);
+	}
+
+	const declared = declaredEncoding(buf);
+	if (declared && declared !== "utf-8") {
+		try {
+			return new TextDecoder(declared).decode(buf);
+		} catch {
+			// Unknown encoding label — fall through to the UTF-8 path.
+		}
+	}
+
 	try {
-		return new TextDecoder(detectEncoding(buf)).decode(buf);
+		return new TextDecoder("utf-8", { fatal: true }).decode(buf);
 	} catch {
-		return new TextDecoder("utf-8").decode(buf);
+		return new TextDecoder("windows-1251").decode(buf);
 	}
 }
 
-// Если открыли .zip: распаковываем архив и достаём из него первый файл
-// с расширением .fb2. Возвращаем его байты, либо null, если не нашли.
-function extractFb2FromZip(buf: ArrayBuffer): ArrayBuffer | null {
-	let entries: Record<string, Uint8Array>;
-	try {
-		// filter — распаковываем только файлы, чьё имя заканчивается на .fb2,
-		// остальное содержимое архива даже не трогаем.
-		entries = unzipSync(new Uint8Array(buf), {
-			filter: (f) => f.name.toLowerCase().endsWith(".fb2"),
-		});
-	} catch {
-		return null; // архив повреждён или это вовсе не zip
-	}
-	const name = Object.keys(entries)[0];
-	if (!name) return null;
-	const data = entries[name];
-	// Uint8Array может «смотреть» в середину большого буфера,
-	// поэтому вырезаем ровно наш кусок байт.
-	return data.buffer.slice(
-		data.byteOffset,
-		data.byteOffset + data.byteLength
-	) as ArrayBuffer;
-}
-
-// Кэш списка шрифтов: запрашивать его у системы каждый раз медленно,
-// поэтому после первого успешного запроса результат запоминается.
+// Cached font list: querying the system is slow, so the first successful
+// result is remembered.
 let cachedSystemFonts: string[] | null = null;
 
-// «async» помечает функцию как асинхронную: она умеет ждать медленные
-// операции (здесь — запрос списка шрифтов у системы), не замораживая
-// интерфейс. Слово «await» внутри означает «дождись результата».
 async function getSystemFonts(): Promise<string[]> {
 	if (cachedSystemFonts) return cachedSystemFonts;
-	// window.queryLocalFonts — сравнительно новая возможность браузера,
-	// которой может и не быть, поэтому описываем её тип вручную
-	// и проверяем наличие.
+	// window.queryLocalFonts is a relatively new browser API that may be
+	// missing (it is Chromium-only), so type it manually and feature-detect.
 	const queryLocalFonts = (
 		window as { queryLocalFonts?: () => Promise<{ family: string }[]> }
 	).queryLocalFonts;
 	if (!queryLocalFonts) return [];
 	try {
 		const fonts: { family: string }[] = await queryLocalFonts.call(window);
-		// Одно семейство шрифта встречается по несколько раз (обычный, жирный,
-		// курсив...). Set оставляет только уникальные имена, sort — сортирует.
+		// Each family is listed once per style (regular, bold, italic...);
+		// keep unique names and sort them.
 		const families = Array.from(new Set(fonts.map((f) => f.family))).sort(
 			(a, b) => a.localeCompare(b)
 		);
 		if (families.length) cachedSystemFonts = families;
 		return families;
 	} catch {
-		return []; // пользователь не дал разрешение — обойдёмся без списка
+		return []; // permission denied — do without the list
 	}
 }
 
-// Достаёт адрес ссылки из элемента FB2. В разных книгах атрибут ссылки
-// записан по-разному (xlink:href, l:href, просто href), поэтому проверяем
-// все варианты по очереди. «??» означает «если слева null — попробуй справа».
+// Extracts the link target from an FB2 element. Real-world books spell the
+// attribute in different ways (xlink:href, l:href, plain href), so try
+// every variant in turn.
 function getHref(el: Element): string | null {
 	return (
 		el.getAttributeNS(XLINK_NS, "href") ??
@@ -242,53 +226,49 @@ function getHref(el: Element): string | null {
 	);
 }
 
-// Переносит атрибут id из тега FB2 на созданный HTML-элемент (под именем
-// data-fb2-id), чтобы внутренние ссылки книги (сноски, перекрёстные ссылки)
-// могли потом найти цель и прокрутить к ней.
+// Copies the FB2 id attribute onto the created HTML element (as data-fb2-id)
+// so the book's internal links (footnotes, cross-references) can find their
+// target and scroll to it.
 function copyId(from: Element, to: HTMLElement) {
 	const id = from.getAttribute("id");
 	if (id) to.setAttribute("data-fb2-id", id);
 }
 
 // ---------------------------------------------------------------------------
-// Fb2View — читалка
+// Fb2View — the reader
 //
-// «class» — это чертёж объекта: набор данных (полей) и действий (методов).
-// «extends FileView» означает: наш класс наследует готовый класс Obsidian
-// для окон, привязанных к файлу, и добавляет/переопределяет нужное нам.
-// Obsidian сам создаёт экземпляр Fb2View, когда пользователь открывает
-// .fb2-файл, и сам вызывает методы жизненного цикла (onLoadFile и др.).
+// Obsidian creates an Fb2View instance when the user opens an .fb2 file and
+// drives its lifecycle methods (onLoadFile and friends) itself.
 // ---------------------------------------------------------------------------
 
 class Fb2View extends FileView {
-	// Пункты оглавления текущей книги; их читает панель Fb2TocView.
+	// TOC entries of the current book; read by the Fb2TocView panel.
 	tocItems: TocItem[] = [];
 
-	// «private» — поле доступно только внутри этого класса.
-	private plugin: Fb2ReaderPlugin; // ссылка на главный объект плагина
-	private bookTitle = ""; // название книги (для заголовка вкладки)
-	private binaries = new Map<string, string>(); // картинки книги: id → data-URL
-	private collectToc = false; // собирать ли сейчас пункты оглавления
-	// debounce «сглаживает» частые вызовы: при прокрутке событие scroll
-	// срабатывает десятки раз в секунду, а сохранять позицию достаточно
-	// один раз, спустя 800 мс после того, как прокрутка затихла.
+	private plugin: Fb2ReaderPlugin;
+	private bookTitle = ""; // book title (used for the tab header)
+	private binaries = new Map<string, string>(); // book images: id → data URL
+	private collectToc = false; // whether TOC entries are being collected right now
+	private jumpOrigin: HTMLElement | null = null; // link that started the last footnote jump
+	private renderQueue: RenderJob[] = []; // blocks still waiting to be rendered
+	private renderPass = 0; // bumping this cancels an in-flight render
+	// Scroll fires dozens of times per second; saving once, 800 ms after
+	// scrolling settles, is enough.
 	private savePositionDebounced = debounce(
 		() => this.saveReadingPosition(),
 		800,
 		true
 	);
 
-	// Конструктор вызывается при создании объекта. «this» — сам объект:
-	// this.plugin = plugin означает «запомни plugin в своём поле plugin».
 	constructor(leaf: WorkspaceLeaf, plugin: Fb2ReaderPlugin) {
-		super(leaf); // сначала даём отработать конструктору родителя (FileView)
+		super(leaf);
 		this.plugin = plugin;
-		this.navigation = true; // вкладка участвует в истории «назад/вперёд»
+		this.navigation = true; // the tab takes part in back/forward history
 	}
 
-	// Вызывается один раз при создании вида. Подписываемся на прокрутку,
-	// чтобы запоминать позицию чтения. registerDomEvent — обёртка Obsidian,
-	// которая сама отпишет обработчик, когда вид закроется.
+	// Called once when the view is created. Subscribe to scrolling to keep
+	// the reading position up to date; registerDomEvent unsubscribes
+	// automatically when the view closes.
 	onload(): void {
 		super.onload();
 		this.registerDomEvent(this.contentEl, "scroll", () =>
@@ -296,58 +276,41 @@ class Fb2View extends FileView {
 		);
 	}
 
-	// Следующие четыре метода — «анкета» вида, которую спрашивает Obsidian.
 	getViewType(): string {
-		return VIEW_TYPE_FB2; // внутреннее имя вида
+		return VIEW_TYPE_FB2;
 	}
 
 	getDisplayText(): string {
-		// Заголовок вкладки: название книги, иначе имя файла, иначе "FB2".
-		// «||» возвращает первый «непустой» вариант слева направо.
+		// Tab title: book title, else file name, else "FB2".
 		return this.bookTitle || this.file?.basename || "FB2";
 	}
 
 	getIcon(): string {
-		return "book-open"; // имя иконки из встроенного набора Obsidian
+		return "book-open"; // icon name from Obsidian's built-in set
 	}
 
 	canAcceptExtension(extension: string): boolean {
-		return extension === "fb2" || extension === "zip";
+		return extension === "fb2";
 	}
 
-	// Главный метод: Obsidian вызывает его, когда в этом виде нужно открыть
-	// файл. Здесь происходит вся цепочка: байты → текст → XML → HTML.
+	// The main entry point: Obsidian calls it when this view has to open
+	// a file. The whole pipeline happens here: bytes → text → XML → HTML.
 	async onLoadFile(file: TFile): Promise<void> {
-		const container = this.contentEl; // корневой HTML-элемент нашего окна
-		container.empty(); // очищаем от предыдущего содержимого
-		container.addClass("fb2-reader"); // CSS-класс, на который нацелены стили
+		const container = this.contentEl;
+		container.empty();
+		container.addClass("fb2-reader"); // CSS class the styles target
 		this.tocItems = [];
 
-		// Шаг 1: читаем файл из хранилища Obsidian как байты.
-		let buf = await this.app.vault.readBinary(file);
+		// Step 1: read the file from the vault as bytes.
+		const buf = await this.app.vault.readBinary(file);
 
-		// Шаг 2: если это zip — достаём из него .fb2.
-		if (file.extension === "zip") {
-			const extracted = extractFb2FromZip(buf);
-			if (!extracted) {
-				container.createEl("p", {
-					text: "No .fb2 file found in this archive.",
-					cls: "fb2-error",
-				});
-				this.plugin.onFb2Opened(this);
-				return;
-			}
-			buf = extracted;
-		}
-
-		// Шаг 3: байты → текст (с угадыванием кодировки).
+		// Step 2: bytes → text (with encoding detection).
 		const xml = decodeFb2(buf);
-		// Шаг 4: текст → дерево XML. DOMParser встроен в браузер: он читает
-		// разметку и строит из неё дерево объектов, по которому можно ходить.
+		// Step 3: text → XML tree.
 		const doc = new DOMParser().parseFromString(xml, "application/xml");
 
-		// При ошибке разбора DOMParser не бросает исключение, а вставляет
-		// в документ специальный тег <parsererror> — проверяем его наличие.
+		// On a parse error DOMParser does not throw; it inserts a special
+		// <parsererror> tag into the document instead.
 		if (doc.querySelector("parsererror")) {
 			container.createEl("p", {
 				text: "Failed to parse the file: invalid XML.",
@@ -356,30 +319,33 @@ class Fb2View extends FileView {
 			return;
 		}
 
-		// Шаг 5: собираем картинки, рисуем книгу, сообщаем плагину
-		// (чтобы тот обновил оглавление) и восстанавливаем позицию чтения.
+		// Step 4: collect images, start rendering the book and notify the
+		// plugin (so it opens the TOC panel). Rendering is sliced across
+		// frames; the reading position is restored when the queue drains.
 		this.collectBinaries(doc);
 		this.renderBook(doc, container.createDiv({ cls: "fb2-book" }));
 		this.plugin.onFb2Opened(this);
-		this.restoreReadingPosition(file.path);
 	}
 
-	// Вызывается при закрытии файла: сохраняем позицию и прибираем за собой,
-	// чтобы не держать в памяти большую книгу.
+	// Called when the file is closed: save the position and clean up
+	// so a large book is not kept in memory.
 	async onUnloadFile(file: TFile): Promise<void> {
+		this.renderPass++; // cancel a render that may still be in flight
+		this.renderQueue = [];
 		this.saveReadingPosition(file);
 		this.plugin.clearTocFor(this);
-		this.binaries.clear();
+		this.clearBinaries();
 		this.tocItems = [];
 		this.bookTitle = "";
+		this.jumpOrigin = null;
 		this.contentEl.empty();
 	}
 
-	// --- Позиция чтения ---
+	// --- Reading position ---
 
-	// Список всех «блоков текста» книги по порядку. Позицию чтения мы
-	// храним как номер блока в этом списке — это надёжнее, чем количество
-	// пикселей прокрутки (которое меняется при смене шрифта или окна).
+	// All text blocks of the book in document order. The reading position is
+	// stored as an index into this list — more robust than a pixel offset,
+	// which changes with font or window size.
 	private getScrollBlocks(): HTMLElement[] {
 		return Array.from(
 			this.contentEl.querySelectorAll<HTMLElement>(
@@ -388,12 +354,12 @@ class Fb2View extends FileView {
 		);
 	}
 
-	// Сохраняем позицию: находим первый блок, который виден на экране
-	// (его нижний край ниже верхней кромки окна), и запоминаем его номер.
+	// Save the position: find the first block visible on screen (its bottom
+	// edge below the top of the viewport) and remember its index.
 	private saveReadingPosition(file = this.file) {
 		if (!file) return;
 		const scroller = this.contentEl;
-		if (scroller.scrollTop <= 0) return; // книга в самом начале — нечего запоминать
+		if (scroller.scrollTop <= 0) return; // at the very beginning — nothing to save
 		const top = scroller.getBoundingClientRect().top;
 		const index = this.getScrollBlocks().findIndex(
 			(b) => b.getBoundingClientRect().bottom > top
@@ -401,12 +367,11 @@ class Fb2View extends FileView {
 		if (index >= 0) this.plugin.setPosition(file.path, index);
 	}
 
-	// Восстанавливаем позицию: прокручиваем к блоку с сохранённым номером.
+	// Restore the position: scroll to the block with the saved index.
 	private restoreReadingPosition(path: string) {
 		const pos = this.plugin.getPosition(path);
 		if (!pos || pos.index <= 0) return;
-		// requestAnimationFrame — «выполни перед следующей отрисовкой экрана»:
-		// к этому моменту браузер уже рассчитает размеры всех элементов.
+		// By the next animation frame the browser has laid out all elements.
 		requestAnimationFrame(() => {
 			const blocks = this.getScrollBlocks();
 			const target = blocks[Math.min(pos.index, blocks.length - 1)];
@@ -414,73 +379,147 @@ class Fb2View extends FileView {
 		});
 	}
 
-	// --- Отрисовка книги ---
+	// --- Rendering ---
 
-	// Картинки в FB2 лежат в конце файла в тегах <binary> в виде текста
-	// base64. Складываем их в словарь «id → data-URL»; такой URL браузер
-	// может показать в <img> без всяких внешних файлов.
+	// FB2 images live at the end of the file in <binary> tags as base64 text.
+	// Each one is decoded into a Blob and exposed as an object URL — far
+	// lighter than data URLs, which keep the full base64 string in memory
+	// (and in every <img> src). The URLs are revoked in clearBinaries when
+	// the file closes; forgetting that would leak the blobs for the whole
+	// session.
 	private collectBinaries(doc: Document) {
-		this.binaries.clear();
+		this.clearBinaries();
 		for (const bin of Array.from(doc.getElementsByTagName("binary"))) {
 			const id = bin.getAttribute("id");
-			if (!id) continue; // без id на картинку нельзя сослаться — пропускаем
+			if (!id) continue; // an image without an id cannot be referenced
 			const type = bin.getAttribute("content-type") || "image/jpeg";
-			const data = (bin.textContent || "").replace(/\s+/g, ""); // убираем переносы строк
-			this.binaries.set(id, `data:${type};base64,${data}`);
+			const data = (bin.textContent || "").replace(/\s+/g, ""); // strip line breaks
+			try {
+				const blob = new Blob([base64ToArrayBuffer(data)], { type });
+				this.binaries.set(id, URL.createObjectURL(blob));
+			} catch {
+				// broken base64 — skip this image
+			}
 		}
 	}
 
-	// Верхний уровень отрисовки: титульная страница, затем все <body>
-	// (основной текст и, отдельным блоком, сноски).
+	// Revokes every object URL created for the current book.
+	private clearBinaries() {
+		for (const url of this.binaries.values()) URL.revokeObjectURL(url);
+		this.binaries.clear();
+	}
+
+	// Top level of rendering: title page, then every <body>
+	// (the main text and, as a separate block, the footnotes).
+	// Bodies are not rendered here directly — their blocks are queued and
+	// rendered in per-frame slices by pumpRenderQueue.
 	private renderBook(doc: Document, root: HTMLElement) {
+		this.renderQueue = [];
+		const pass = ++this.renderPass;
+
 		const titleInfo = doc.querySelector("description > title-info");
 		this.collectToc = false;
 		if (titleInfo) this.renderTitleInfo(titleInfo, root);
 
 		for (const body of Array.from(doc.querySelectorAll("FictionBook > body"))) {
-			// <body name="notes"> — это сноски; их заголовки в оглавление не берём.
+			// <body name="notes"> holds footnotes; keep their headings out of the TOC.
 			const isNotes = body.getAttribute("name") === "notes";
-			this.collectToc = !isNotes;
 			const bodyEl = root.createDiv({
 				cls: isNotes ? "fb2-body fb2-notes" : "fb2-body",
 			});
-			if (isNotes) bodyEl.createEl("hr"); // разделительная черта перед сносками
-			this.renderBlockChildren(body, bodyEl, 1);
+			if (isNotes) bodyEl.createEl("hr"); // divider before the footnotes
+			this.renderQueue.push(...this.childJobs(body, bodyEl, 1, !isNotes));
 		}
-		this.collectToc = false;
 
-		// Один обработчик кликов на всю книгу — для внутренних ссылок
-		// (сносок и перекрёстных ссылок): ищем элемент с нужным data-fb2-id
-		// и плавно прокручиваем к нему.
+		// A single click handler for the whole book serves internal links
+		// (footnotes and cross-references): find the element with the matching
+		// data-fb2-id and smooth-scroll to it. The jump leaves a "↩" back link
+		// at the destination so the reader can return to where they were.
 		root.addEventListener("click", (evt) => {
-			const link = (evt.target as HTMLElement).closest("a[data-fb2-target]");
+			const clicked = evt.target as HTMLElement;
+
+			const back = clicked.closest(".fb2-backref");
+			if (back) {
+				evt.preventDefault();
+				this.jumpOrigin?.scrollIntoView({ behavior: "smooth", block: "center" });
+				this.jumpOrigin = null;
+				back.remove();
+				return;
+			}
+
+			const link = clicked.closest("a[data-fb2-target]");
 			if (!link) return;
-			evt.preventDefault(); // отменяем стандартный переход по ссылке
+			evt.preventDefault();
 			const target = link.getAttribute("data-fb2-target");
 			const dest = root.querySelector(
 				`[data-fb2-id="${CSS.escape(target ?? "")}"]`
 			);
-			dest?.scrollIntoView({ behavior: "smooth", block: "start" });
+			if (!(dest instanceof HTMLElement)) return;
+			root.querySelector(".fb2-backref")?.remove(); // only one back link at a time
+			this.jumpOrigin = link as HTMLElement;
+			dest.createEl("a", {
+				cls: "fb2-backref",
+				text: "↩",
+				attr: { href: "#", "aria-label": "Back to text" },
+			});
+			dest.scrollIntoView({ behavior: "smooth", block: "start" });
 		});
+
+		this.pumpRenderQueue(pass);
 	}
 
-	// Титульная страница: обложка, название, авторы, аннотация.
+	// Turns the children of an FB2 element into render jobs.
+	private childJobs(
+		el: Element,
+		parent: HTMLElement,
+		depth: number,
+		toc: boolean
+	): RenderJob[] {
+		return Array.from(el.children).map((child) => ({
+			el: child,
+			parent,
+			depth,
+			toc,
+		}));
+	}
+
+	// Renders queued blocks in ~12 ms slices, yielding to the browser between
+	// slices, so even a huge book never freezes the UI. Once the queue drains,
+	// refreshes the TOC panel and restores the reading position.
+	private pumpRenderQueue(pass: number) {
+		const deadline = performance.now() + 12;
+		while (this.renderQueue.length) {
+			if (performance.now() > deadline) {
+				requestAnimationFrame(() => {
+					// A new render (or file close) may have started meanwhile.
+					if (pass === this.renderPass) this.pumpRenderQueue(pass);
+				});
+				return;
+			}
+			const job = this.renderQueue.shift() as RenderJob;
+			this.collectToc = job.toc;
+			this.renderBlock(job.el, job.parent, job.depth);
+		}
+		this.collectToc = false;
+		this.plugin.updateToc(this);
+		if (this.file) this.restoreReadingPosition(this.file.path);
+	}
+
+	// Title page: cover, title, authors, annotation.
 	private renderTitleInfo(info: Element, root: HTMLElement) {
 		const header = root.createDiv({ cls: "fb2-title-page" });
 
 		const coverImage = info.querySelector("coverpage > image");
 		if (coverImage) this.renderImage(coverImage, header, "fb2-cover");
 
-		// «?.» — безопасное обращение: если book-title отсутствует, вся
-		// цепочка вернёт undefined вместо ошибки.
 		const title = info.querySelector("book-title")?.textContent?.trim();
 		if (title) {
 			this.bookTitle = title;
 			header.createEl("h1", { text: title, cls: "fb2-book-title" });
 		}
 
-		// Для каждого <author> склеиваем имя-отчество-фамилию через пробел,
-		// пропуская отсутствующие части; пустых авторов отбрасываем.
+		// For each <author>, join first/middle/last name with spaces,
+		// skipping missing parts; drop authors that end up empty.
 		const authors = Array.from(info.querySelectorAll(":scope > author"))
 			.map((a) =>
 				["first-name", "middle-name", "last-name"]
@@ -495,41 +534,44 @@ class Fb2View extends FileView {
 
 		const annotation = info.querySelector("annotation");
 		if (annotation) {
-			this.renderBlockChildren(
-				annotation,
-				header.createDiv({ cls: "fb2-annotation" }),
-				1
+			// Queued (not rendered inline): the queue is still empty at this
+			// point, so the annotation is rendered in the very first slice.
+			this.renderQueue.push(
+				...this.childJobs(
+					annotation,
+					header.createDiv({ cls: "fb2-annotation" }),
+					1,
+					false
+				)
 			);
 		}
 	}
 
-	// Обходит всех детей элемента и отрисовывает каждого как блок.
-	private renderBlockChildren(el: Element, parent: HTMLElement, depth: number) {
-		for (const child of Array.from(el.children)) {
-			this.renderBlock(child, parent, depth);
-		}
-	}
-
-	// Сердце читалки: превращает один блочный тег FB2 в HTML.
-	// Метод рекурсивный — для вложенных тегов он вызывает сам себя,
-	// так дерево FB2 обходится целиком, на любую глубину.
+	// The heart of the reader: turns one FB2 block tag into HTML.
+	// Leaf blocks (paragraphs, tables...) are rendered immediately; container
+	// blocks create their wrapper and queue their children to the FRONT of the
+	// render queue, which keeps depth-first document order while letting
+	// pumpRenderQueue slice the work across frames.
 	private renderBlock(el: Element, parent: HTMLElement, depth: number) {
-		const tag = el.localName; // имя тега без префиксов, например "section"
+		const tag = el.localName; // tag name without prefixes, e.g. "section"
 
-		// Случай 1: тег-контейнер из таблицы BLOCK_CONTAINERS.
+		// Case 1: a container tag from BLOCK_CONTAINERS.
 		const container = BLOCK_CONTAINERS[tag];
 		if (container) {
 			const box = parent.createEl(container.tag, { cls: container.cls });
 			copyId(el, box);
-			this.renderBlockChildren(
-				el,
-				box,
-				tag === "section" ? depth + 1 : depth
+			this.renderQueue.unshift(
+				...this.childJobs(
+					el,
+					box,
+					tag === "section" ? depth + 1 : depth,
+					this.collectToc
+				)
 			);
 			return;
 		}
 
-		// Случай 2: тег-абзац из таблицы BLOCK_PARAGRAPHS.
+		// Case 2: a paragraph tag from BLOCK_PARAGRAPHS.
 		const paragraphCls = BLOCK_PARAGRAPHS[tag];
 		if (paragraphCls) {
 			const p = parent.createEl("p", { cls: paragraphCls });
@@ -538,18 +580,18 @@ class Fb2View extends FileView {
 			return;
 		}
 
-		// Случай 3: особые теги, которым нужна своя логика.
+		// Case 3: special tags that need their own logic.
 		switch (tag) {
 			case "title": {
-				// Заголовок главы. Уровень (h2, h3...) зависит от глубины
-				// вложенности секции; глубже h6 в HTML не бывает.
+				// Chapter heading. The level (h2, h3...) depends on the section
+				// nesting depth; HTML has nothing deeper than h6.
 				const level = Math.min(depth + 1, 6);
 				const heading = parent.createEl(
 					`h${level}` as keyof HTMLElementTagNameMap,
 					{ cls: "fb2-title" }
 				);
-				// Заголовок в FB2 может состоять из нескольких <p> —
-				// показываем их с новой строки (через <br>).
+				// An FB2 heading may consist of several <p> elements —
+				// render each on its own line (separated by <br>).
 				const tocText: string[] = [];
 				for (const child of Array.from(el.children)) {
 					if (child.localName !== "p") continue;
@@ -558,20 +600,20 @@ class Fb2View extends FileView {
 					const text = child.textContent?.trim();
 					if (text) tocText.push(text);
 				}
-				// Попутно добавляем пункт в оглавление (кроме раздела сносок).
+				// Also add a TOC entry (except inside the footnotes body).
 				if (this.collectToc) {
 					this.tocItems.push({ text: tocText.join(" "), depth, el: heading });
 				}
 				break;
 			}
 			case "empty-line":
-				parent.createDiv({ cls: "fb2-empty-line" }); // пустой отступ
+				parent.createDiv({ cls: "fb2-empty-line" }); // vertical gap
 				break;
 			case "image":
 				this.renderImage(el, parent, "fb2-image-block");
 				break;
 			case "table": {
-				// Таблица: переносим строки <tr> и ячейки <td>/<th> как есть.
+				// Copy <tr> rows and <td>/<th> cells over as they are.
 				const table = parent.createEl("table", { cls: "fb2-table" });
 				for (const tr of Array.from(el.querySelectorAll("tr"))) {
 					const rowEl = table.createEl("tr");
@@ -583,32 +625,40 @@ class Fb2View extends FileView {
 				break;
 			}
 			default:
-				// Незнакомый тег: не рисуем его сам, но обходим детей —
-				// вдруг внутри есть знакомые теги, которые можно показать.
-				this.renderBlockChildren(el, parent, depth);
+				// Unknown tag: don't render it itself, but keep its content.
+				// A tag with element children is walked recursively; a tag
+				// holding only text (e.g. <date> inside a poem) degrades to
+				// a paragraph so the text isn't silently dropped.
+				if (el.children.length) {
+					this.renderQueue.unshift(
+						...this.childJobs(el, parent, depth, this.collectToc)
+					);
+				} else {
+					const text = el.textContent?.trim();
+					if (text) parent.createEl("p", { cls: "fb2-p", text });
+				}
 		}
 	}
 
-	// Обходит всё содержимое элемента (и теги, и куски текста)
-	// и отрисовывает как строчные элементы.
+	// Renders all content of the element (both tags and text nodes) inline.
 	private renderInlineChildren(el: Element, parent: HTMLElement) {
 		for (const node of Array.from(el.childNodes)) {
 			this.renderInline(node, parent);
 		}
 	}
 
-	// Отрисовка строчного содержимого: текст, курсив, ссылки, сноски...
+	// Renders inline content: text, emphasis, links, footnotes...
 	private renderInline(node: Node, parent: HTMLElement) {
-		// Просто текст между тегами — добавляем как есть.
+		// Plain text between tags — append as is.
 		if (node.nodeType === Node.TEXT_NODE) {
 			parent.appendText(node.textContent ?? "");
 			return;
 		}
-		if (node.nodeType !== Node.ELEMENT_NODE) return; // комментарии и пр. — пропускаем
+		if (node.nodeType !== Node.ELEMENT_NODE) return; // skip comments etc.
 		const el = node as Element;
 		const tag = el.localName;
 
-		// Простые теги из таблицы INLINE_TAGS: <emphasis> → <em> и т.п.
+		// Simple tags from INLINE_TAGS: <emphasis> → <em> and so on.
 		const htmlTag = INLINE_TAGS[tag];
 		if (htmlTag) {
 			this.renderInlineChildren(el, parent.createEl(htmlTag));
@@ -621,36 +671,43 @@ class Fb2View extends FileView {
 				break;
 			case "a": {
 				const href = getHref(el) ?? "";
-				// Сноска (type="note") оборачивается в <sup>, чтобы её номер
-				// отображался маленькой цифрой сверху.
+				// A footnote (type="note") is wrapped in <sup> so its number
+				// renders as a small superscript.
 				const isNote = el.getAttribute("type") === "note";
 				const host = isNote ? parent.createEl("sup") : parent;
 				const anchor = host.createEl("a", { cls: "fb2-link" });
 				if (href.startsWith("#")) {
-					// Внутренняя ссылка (на сноску или главу): запоминаем цель
-					// в data-fb2-target — клики ловит обработчик в renderBook.
+					// Internal link (footnote or chapter): store the target in
+					// data-fb2-target — clicks are handled in renderBook.
 					anchor.setAttribute("data-fb2-target", href.slice(1));
 					anchor.setAttribute("href", "#");
-				} else {
-					anchor.setAttribute("href", href); // обычная внешняя ссылка
+				} else if (/^https?:\/\//i.test(href)) {
+					// External link: http(s) only. A malicious file could carry
+					// a javascript: or other scheme URL — clicking it would run
+					// code in the renderer, so anything else stays inert
+					// (the <a> keeps its text but gets no href).
+					anchor.setAttribute("href", href);
 				}
 				this.renderInlineChildren(el, anchor);
 				break;
 			}
 			default:
-				// Незнакомый строчный тег — показываем хотя бы его содержимое.
+				// Unknown inline tag — at least render its content.
 				this.renderInlineChildren(el, parent);
 		}
 	}
 
-	// Вставляет картинку: по ссылке "#id" находит data-URL
-	// в словаре binaries и создаёт элемент <img>.
+	// Inserts an image: resolves the "#id" reference to an object URL
+	// in the binaries map and creates an <img> element. loading="lazy" defers
+	// fetching/decoding until the image approaches the viewport.
 	private renderImage(el: Element, parent: HTMLElement, cls: string) {
 		const href = getHref(el);
 		if (!href || !href.startsWith("#")) return;
 		const src = this.binaries.get(href.slice(1));
 		if (!src) return;
 		const img = parent.createEl("img", { cls });
+		img.loading = "lazy";
+		img.decoding = "async";
 		img.src = src;
 		const alt = el.getAttribute("alt");
 		if (alt) img.alt = alt;
@@ -658,14 +715,14 @@ class Fb2View extends FileView {
 }
 
 // ---------------------------------------------------------------------------
-// Fb2TocView — боковая панель с оглавлением
+// Fb2TocView — the table-of-contents side panel
 //
-// Наследуется от ItemView (вид без привязки к файлу). Панель ничего не
-// вычисляет сама: она показывает список tocItems, который собрала читалка.
+// Computes nothing itself: it displays the tocItems list collected
+// by the reader view.
 // ---------------------------------------------------------------------------
 
 class Fb2TocView extends ItemView {
-	// Читалка, чьё оглавление показываем сейчас (null — никакой).
+	// The reader whose TOC is currently shown (null — none).
 	private source: Fb2View | null = null;
 
 	getViewType(): string {
@@ -680,17 +737,16 @@ class Fb2TocView extends ItemView {
 		return "list";
 	}
 
-	// Вызывается Obsidian, когда панель открывается.
 	async onOpen(): Promise<void> {
 		this.render();
 	}
 
-	// Показывает ли панель оглавление именно этой читалки?
+	// Is this panel showing the TOC of the given reader?
 	sourceIs(view: Fb2View): boolean {
 		return this.source === view;
 	}
 
-	// Плагин вызывает это при смене активной книги; панель перерисовывается.
+	// Called by the plugin when the active book changes; re-renders the panel.
 	setSource(view: Fb2View | null) {
 		this.source = view;
 		this.render();
@@ -709,16 +765,16 @@ class Fb2TocView extends ItemView {
 			return;
 		}
 
-		// Название книги сверху, затем — по строке на каждый заголовок.
+		// Book title on top, then one row per heading.
 		el.createDiv({ cls: "fb2-toc-book", text: this.source.getDisplayText() });
 		for (const item of this.source.tocItems) {
 			const row = el.createDiv({
 				cls: "fb2-toc-item",
 				text: item.text || "(untitled)",
 			});
-			// Отступ слева зависит от глубины — так видна вложенность глав.
+			// Indentation grows with depth to show chapter nesting.
 			row.style.paddingLeft = `${(item.depth - 1) * 14 + 6}px`;
-			// Клик по пункту: показать вкладку с книгой и прокрутить к главе.
+			// Click: reveal the book tab and scroll to the chapter.
 			row.addEventListener("click", () => {
 				const src = this.source;
 				if (!src) return;
@@ -730,27 +786,22 @@ class Fb2TocView extends ItemView {
 }
 
 // ---------------------------------------------------------------------------
-// Fb2ReaderPlugin — главный класс плагина
+// Fb2ReaderPlugin — the main plugin class
 //
-// «export default» делает класс видимым снаружи файла: именно его Obsidian
-// находит и создаёт при включении плагина. Этот класс связывает всё вместе:
-// регистрирует виды, хранит и сохраняет настройки и позиции чтения,
-// управляет панелью оглавления.
+// Ties everything together: registers the views, stores and persists
+// settings and reading positions, and manages the TOC panel.
 // ---------------------------------------------------------------------------
 
 export default class Fb2ReaderPlugin extends Plugin {
-	// Все данные плагина (настройки + позиции чтения).
+	// All plugin data (settings + reading positions).
 	private data: Fb2Data = { positions: {}, settings: { ...DEFAULT_SETTINGS } };
-	// Отложенное сохранение на диск: не чаще, чем раз в 2 секунды,
-	// чтобы не писать файл при каждом чихе.
+	// Deferred saving: write to disk at most once per 2 seconds.
 	private saveDataDebounced = debounce(() => this.saveData(this.data), 2000, true);
 
-	// Вызывается Obsidian при включении плагина. Здесь — вся регистрация.
 	async onload() {
-		// Загружаем сохранённые данные (data.json). «?? {}» — если данных
-		// ещё нет (первый запуск), берём пустой объект. Object.assign
-		// накладывает сохранённые настройки поверх настроек по умолчанию:
-		// так новые поля, появившиеся в обновлении плагина, получат значения.
+		// Load persisted data (data.json). Object.assign layers the stored
+		// settings over the defaults, so fields added in a plugin update
+		// still get values.
 		const stored = (await this.loadData()) ?? {};
 		this.data = {
 			positions: stored.positions ?? {},
@@ -758,17 +809,17 @@ export default class Fb2ReaderPlugin extends Plugin {
 		};
 		this.applySettings();
 
-		// Сообщаем Obsidian, как создавать наши виды...
+		// Tell Obsidian how to create our views...
 		this.registerView(VIEW_TYPE_FB2, (leaf) => new Fb2View(leaf, this));
 		this.registerView(VIEW_TYPE_TOC, (leaf) => new Fb2TocView(leaf));
-		// ...и что файлы .fb2 и .zip должны открываться в нашей читалке.
-		this.registerExtensions(["fb2", "zip"], VIEW_TYPE_FB2);
+		// ...and that .fb2 files open in the reader.
+		this.registerExtensions(["fb2"], VIEW_TYPE_FB2);
 		this.addSettingTab(new Fb2SettingTab(this.app, this));
 
-		// Кнопка на левой панели Obsidian — открывает настройки плагина.
+		// Ribbon button that opens the plugin settings.
 		this.addRibbonIcon("book-open-text", "FB2 Reader settings", () => {
-			// app.setting — недокументированная часть Obsidian API, поэтому
-			// её тип приходится дописывать вручную (см. GUIDE.md).
+			// app.setting is an undocumented part of the Obsidian API,
+			// so its type has to be spelled out manually.
 			const appSetting = (
 				this.app as App & {
 					setting: { open(): void; openTabById(id: string): void };
@@ -778,15 +829,14 @@ export default class Fb2ReaderPlugin extends Plugin {
 			appSetting.openTabById(this.manifest.id);
 		});
 
-		// Команда для палитры команд (Ctrl/Cmd+P): открыть оглавление.
+		// Command palette entry: open the table of contents.
 		this.addCommand({
 			id: "open-toc",
 			name: "Open table of contents",
 			callback: () => this.activateTocLeaf(),
 		});
 
-		// При переключении вкладок: если активной стала читалка —
-		// показываем в панели её оглавление.
+		// When the active tab changes to a reader, show its TOC in the panel.
 		this.registerEvent(
 			this.app.workspace.on("active-leaf-change", (leaf) => {
 				if (leaf?.view instanceof Fb2View) this.updateToc(leaf.view);
@@ -794,8 +844,8 @@ export default class Fb2ReaderPlugin extends Plugin {
 		);
 	}
 
-	// Вызывается при выключении плагина: сохраняем данные и убираем
-	// с <body> все следы наших настроек (CSS-переменные и классы тем).
+	// Called when the plugin is disabled: save data and remove every trace
+	// of our settings from <body> (CSS variables and theme classes).
 	onunload() {
 		void this.saveData(this.data);
 		const body = document.body;
@@ -803,20 +853,23 @@ export default class Fb2ReaderPlugin extends Plugin {
 		body.style.removeProperty("--fb2-font-size");
 		body.style.removeProperty("--fb2-line-height");
 		body.style.removeProperty("--fb2-text-color");
-		body.removeClass("fb2-theme-dark", "fb2-theme-light", "fb2-theme-sepia");
+		body.removeClass(
+			"fb2-theme-dark",
+			"fb2-theme-light",
+			"fb2-theme-sepia",
+			"fb2-dropcaps"
+		);
 	}
 
-	// --- Настройки ---
+	// --- Settings ---
 
-	// «get» делает метод похожим на поле: снаружи пишут plugin.fb2Settings
-	// без скобок и получают текущие настройки.
 	get fb2Settings(): Fb2Settings {
 		return this.data.settings;
 	}
 
-	// Применяет настройки к странице. Значения записываются в CSS-переменные
-	// на <body>; файл styles.css читает их и оформляет книгу. Так код
-	// и оформление общаются, не зная друг о друге лишнего.
+	// Applies the settings to the page by writing them into CSS variables
+	// on <body>; styles.css reads them and styles the book. This keeps the
+	// code and the styling decoupled.
 	applySettings() {
 		const s = this.data.settings;
 		const body = document.body;
@@ -824,21 +877,21 @@ export default class Fb2ReaderPlugin extends Plugin {
 		else body.style.removeProperty("--fb2-font-family");
 		body.style.setProperty("--fb2-font-size", `${s.fontSize}px`);
 		body.style.setProperty("--fb2-line-height", `${s.lineHeight}`);
-		// toggleClass(класс, условие): добавляет класс при true, снимает при false.
 		body.toggleClass("fb2-theme-dark", s.theme === "dark");
 		body.toggleClass("fb2-theme-light", s.theme === "light");
 		body.toggleClass("fb2-theme-sepia", s.theme === "sepia");
+		body.toggleClass("fb2-dropcaps", s.dropCaps);
 		if (s.textColor) body.style.setProperty("--fb2-text-color", s.textColor);
 		else body.style.removeProperty("--fb2-text-color");
 	}
 
-	// Применить и (отложенно) сохранить — вызывается из вкладки настроек.
+	// Apply and (deferred) save — called from the settings tab.
 	saveSettings() {
 		this.applySettings();
 		this.saveDataDebounced();
 	}
 
-	// --- Позиции чтения ---
+	// --- Reading positions ---
 
 	getPosition(path: string): ReadingPosition | undefined {
 		return this.data.positions[path];
@@ -850,19 +903,19 @@ export default class Fb2ReaderPlugin extends Plugin {
 		this.saveDataDebounced();
 	}
 
-	// Чтобы data.json не разрастался бесконечно, храним позиции только
-	// для 300 последних книг; самые старые записи удаляются.
+	// Keep positions for the 300 most recent books only, so data.json
+	// does not grow forever; the oldest entries are dropped.
 	private prunePositions() {
 		const entries = Object.entries(this.data.positions);
 		if (entries.length <= 300) return;
-		entries.sort((a, b) => b[1].ts - a[1].ts); // сортируем по времени, новые сверху
+		entries.sort((a, b) => b[1].ts - a[1].ts); // newest first
 		this.data.positions = Object.fromEntries(entries.slice(0, 300));
 	}
 
-	// --- Панель оглавления ---
+	// --- TOC panel ---
 
-	// Читалка зовёт этот метод, когда открыла книгу: если панели оглавления
-	// ещё нет — создаём её в правой боковой панели, затем обновляем.
+	// Called by the reader when it has opened a book: create the TOC panel
+	// in the right sidebar if it does not exist yet, then refresh it.
 	onFb2Opened(view: Fb2View) {
 		this.app.workspace.onLayoutReady(async () => {
 			if (!this.app.workspace.getLeavesOfType(VIEW_TYPE_TOC).length) {
@@ -873,14 +926,14 @@ export default class Fb2ReaderPlugin extends Plugin {
 		});
 	}
 
-	// Показывает во всех панелях оглавления содержание указанной читалки.
+	// Shows the given reader's TOC in every TOC panel.
 	updateToc(view: Fb2View | null) {
 		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_TOC)) {
 			if (leaf.view instanceof Fb2TocView) leaf.view.setSource(view);
 		}
 	}
 
-	// Когда книга закрывается — очищаем панели, показывавшие её оглавление.
+	// When a book closes, clear the panels that were showing its TOC.
 	clearTocFor(view: Fb2View) {
 		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_TOC)) {
 			if (leaf.view instanceof Fb2TocView && leaf.view.sourceIs(view)) {
@@ -889,8 +942,8 @@ export default class Fb2ReaderPlugin extends Plugin {
 		}
 	}
 
-	// Обработчик команды "Open table of contents": находит (или создаёт)
-	// панель оглавления, показывает её и наполняет содержанием активной книги.
+	// "Open table of contents" command: find (or create) the TOC panel,
+	// reveal it and fill it with the active book's contents.
 	private async activateTocLeaf() {
 		let leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_TOC)[0];
 		if (!leaf) {
@@ -906,18 +959,16 @@ export default class Fb2ReaderPlugin extends Plugin {
 }
 
 // ---------------------------------------------------------------------------
-// Fb2SettingTab — вкладка настроек
+// Fb2SettingTab — the settings tab
 //
-// Наследуется от PluginSettingTab. Obsidian вызывает метод display() каждый
-// раз, когда пользователь открывает настройки плагина. Каждый элемент
-// интерфейса создаётся классом Setting: имя, описание и поле ввода.
-// Общий приём: onChange поля меняет значение в plugin.fb2Settings
-// и зовёт plugin.saveSettings() — настройка применяется сразу.
+// Obsidian calls display() every time the user opens the plugin settings.
+// Each control's onChange updates plugin.fb2Settings and calls
+// plugin.saveSettings(), so changes apply immediately.
 // ---------------------------------------------------------------------------
 
 class Fb2SettingTab extends PluginSettingTab {
 	private plugin: Fb2ReaderPlugin;
-	// Счётчик перерисовок — защита от «гонки» (см. комментарий в render).
+	// Render counter — guards against a race (see the comment in render).
 	private renderToken = 0;
 
 	constructor(app: App, plugin: Fb2ReaderPlugin) {
@@ -926,13 +977,12 @@ class Fb2SettingTab extends PluginSettingTab {
 	}
 
 	display(): void {
-		// render — асинхронный (ждёт список шрифтов); «void» говорит:
-		// «запусти и не жди результата».
+		// render is async (it awaits the font list); fire and forget.
 		void this.render();
 	}
 
-	// Помощник: числовое поле, принимающее только значения из [min, max].
-	// Используется дважды — для размера шрифта и межстрочного интервала.
+	// Helper: a numeric field accepting only values within [min, max].
+	// Used twice — for font size and line height.
 	private addNumberSetting(
 		name: string,
 		desc: string,
@@ -952,7 +1002,7 @@ class Fb2SettingTab extends PluginSettingTab {
 				text.inputEl.step = step;
 				text.setValue(String(getValue())).onChange((value) => {
 					const n = Number(value);
-					// Не число или вне диапазона — просто не сохраняем.
+					// Not a number or out of range — simply don't save.
 					if (!Number.isFinite(n) || n < min || n > max) return;
 					setValue(n);
 					this.plugin.saveSettings();
@@ -963,15 +1013,15 @@ class Fb2SettingTab extends PluginSettingTab {
 	private async render(): Promise<void> {
 		const token = ++this.renderToken;
 		const fonts = await getSystemFonts();
-		// Пока мы ждали список шрифтов, пользователь мог закрыть и снова
-		// открыть настройки — тогда запустился новый render. Если наш номер
-		// уже не последний, тихо выходим и даём победить более новому.
+		// While we were awaiting the font list the user may have closed and
+		// reopened the settings, starting a newer render. If our token is
+		// no longer the latest, quietly yield to the newer one.
 		if (token !== this.renderToken) return;
 
 		const { containerEl } = this;
 		containerEl.empty();
 
-		// Тема оформления читалки.
+		// Reader color theme.
 		new Setting(containerEl)
 			.setName("Theme")
 			.setDesc("Color scheme for the reading area.")
@@ -988,9 +1038,9 @@ class Fb2SettingTab extends PluginSettingTab {
 					})
 			);
 
-		// Цвет текста: варианты из TEXT_COLORS. Если в настройках сохранён
-		// цвет не из списка (например, вписанный вручную в data.json),
-		// добавляем его отдельным пунктом, чтобы выбор не «слетал».
+		// Text color: presets from TEXT_COLORS. If the saved color is not in
+		// the list (e.g. hand-edited in data.json), add it as an extra option
+		// so the selection doesn't get lost.
 		new Setting(containerEl)
 			.setName("Text color")
 			.setDesc("Color of the main book text. Default follows the theme.")
@@ -1008,9 +1058,8 @@ class Fb2SettingTab extends PluginSettingTab {
 				});
 			});
 
-		// Шрифт: если удалось получить список системных шрифтов — даём
-		// выпадающий список; если нет (нет разрешения или старая система) —
-		// обычное текстовое поле для ввода названия вручную.
+		// Font: a dropdown when the system font list is available, otherwise
+		// (no permission, unsupported platform) a plain text field.
 		const fontSetting = new Setting(containerEl).setName("Font");
 		if (fonts.length) {
 			fontSetting.setDesc("Font used for book text.").addDropdown((dd) => {
@@ -1062,8 +1111,20 @@ class Fb2SettingTab extends PluginSettingTab {
 			(n) => (this.plugin.fb2Settings.lineHeight = n)
 		);
 
-		// Кнопка сброса: возвращает настройки по умолчанию
-		// и перерисовывает вкладку, чтобы поля показали новые значения.
+		new Setting(containerEl)
+			.setName("Drop caps")
+			.setDesc("Large initial letter at the first paragraph of each chapter.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.fb2Settings.dropCaps)
+					.onChange((value) => {
+						this.plugin.fb2Settings.dropCaps = value;
+						this.plugin.saveSettings();
+					})
+			);
+
+		// Reset button: restore defaults and re-render the tab so the
+		// controls show the new values.
 		new Setting(containerEl).addButton((btn) =>
 			btn.setButtonText("Reset to defaults").onClick(() => {
 				Object.assign(this.plugin.fb2Settings, DEFAULT_SETTINGS);
