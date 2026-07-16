@@ -21,6 +21,7 @@ import {
 	ItemView,
 	Plugin,
 	PluginSettingTab,
+	Setting,
 	TFile,
 	WorkspaceLeaf,
 } from "obsidian";
@@ -965,13 +966,16 @@ export default class Fb2ReaderPlugin extends Plugin {
 // ---------------------------------------------------------------------------
 // Fb2SettingTab — the settings tab
 //
-// Rendered declaratively from getSettingDefinitions() (Obsidian 1.13+),
-// which also feeds the settings search. Values are read and persisted via
-// getControlValue/setControlValue over the plugin's data.json.
+// On Obsidian 1.13+ the tab is rendered declaratively from
+// getSettingDefinitions(), which also feeds the settings search. The
+// imperative display()/render() pair below is the fallback for older
+// versions and is not called when definitions are provided.
 // ---------------------------------------------------------------------------
 
 class Fb2SettingTab extends PluginSettingTab {
 	private plugin: Fb2ReaderPlugin;
+	// Render counter — guards against a race (see the comment in render).
+	private renderToken = 0;
 	// The system font list is fetched once, asynchronously; the tab
 	// re-renders when it arrives (see fontDefinition).
 	private fontsRequested = false;
@@ -980,6 +984,8 @@ class Fb2SettingTab extends PluginSettingTab {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
+
+	// --- Declarative settings (Obsidian 1.13+) ---
 
 	getSettingDefinitions(): SettingDefinitionItem[] {
 		return [
@@ -1119,4 +1125,163 @@ class Fb2SettingTab extends PluginSettingTab {
 		};
 	}
 
+	// --- Imperative fallback for Obsidian older than 1.13 ---
+
+	display(): void {
+		// render is async (it awaits the font list); fire and forget.
+		void this.render();
+	}
+
+	// Helper: a numeric field accepting only values within [min, max].
+	// Used twice — for font size and line height.
+	private addNumberSetting(
+		name: string,
+		desc: string,
+		min: number,
+		max: number,
+		step: string,
+		getValue: () => number,
+		setValue: (n: number) => void
+	) {
+		new Setting(this.containerEl)
+			.setName(name)
+			.setDesc(desc)
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text.inputEl.min = String(min);
+				text.inputEl.max = String(max);
+				text.inputEl.step = step;
+				text.setValue(String(getValue())).onChange((value) => {
+					const n = Number(value);
+					// Not a number or out of range — simply don't save.
+					if (!Number.isFinite(n) || n < min || n > max) return;
+					setValue(n);
+					this.plugin.saveSettings();
+				});
+			});
+	}
+
+	private async render(): Promise<void> {
+		const token = ++this.renderToken;
+		const fonts = await getSystemFonts();
+		// While we were awaiting the font list the user may have closed and
+		// reopened the settings, starting a newer render. If our token is
+		// no longer the latest, quietly yield to the newer one.
+		if (token !== this.renderToken) return;
+
+		const { containerEl } = this;
+		containerEl.empty();
+
+		// Reader color theme.
+		new Setting(containerEl)
+			.setName("Theme")
+			.setDesc("Color scheme for the reading area.")
+			.addDropdown((dd) =>
+				dd
+					.addOption("", "Same as Obsidian")
+					.addOption("light", "Light")
+					.addOption("dark", "Dark")
+					.addOption("sepia", "Sepia")
+					.setValue(this.plugin.fb2Settings.theme)
+					.onChange((value) => {
+						this.plugin.fb2Settings.theme = value as Fb2Theme;
+						this.plugin.saveSettings();
+					})
+			);
+
+		// Text color: presets from TEXT_COLORS. If the saved color is not in
+		// the list (e.g. hand-edited in data.json), add it as an extra option
+		// so the selection doesn't get lost.
+		new Setting(containerEl)
+			.setName("Text color")
+			.setDesc("Color of the main book text. Default follows the theme.")
+			.addDropdown((dd) => {
+				const current = this.plugin.fb2Settings.textColor;
+				if (current && !(current in TEXT_COLORS)) {
+					dd.addOption(current, current);
+				}
+				for (const [value, label] of Object.entries(TEXT_COLORS)) {
+					dd.addOption(value, label);
+				}
+				dd.setValue(current).onChange((value) => {
+					this.plugin.fb2Settings.textColor = value;
+					this.plugin.saveSettings();
+				});
+			});
+
+		// Font: a dropdown when the system font list is available, otherwise
+		// (no permission, unsupported platform) a plain text field.
+		const fontSetting = new Setting(containerEl).setName("Font");
+		if (fonts.length) {
+			fontSetting.setDesc("Font used for book text.").addDropdown((dd) => {
+				dd.addOption("", "Same as Obsidian");
+				const current = this.plugin.fb2Settings.fontFamily;
+				if (current && !fonts.includes(current)) {
+					dd.addOption(current, current);
+				}
+				for (const family of fonts) dd.addOption(family, family);
+				dd.setValue(current).onChange((value) => {
+					this.plugin.fb2Settings.fontFamily = value;
+					this.plugin.saveSettings();
+				});
+			});
+		} else {
+			fontSetting
+				.setDesc(
+					"System font list is unavailable; type a font family name. " +
+						"Leave empty to use the Obsidian theme font."
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("Same as Obsidian")
+						.setValue(this.plugin.fb2Settings.fontFamily)
+						.onChange((value) => {
+							this.plugin.fb2Settings.fontFamily = value.trim();
+							this.plugin.saveSettings();
+						})
+				);
+		}
+
+		this.addNumberSetting(
+			"Font size",
+			"Book text size in pixels (8–72).",
+			8,
+			72,
+			"1",
+			() => this.plugin.fb2Settings.fontSize,
+			(n) => (this.plugin.fb2Settings.fontSize = n)
+		);
+
+		this.addNumberSetting(
+			"Line height",
+			"Line spacing multiplier (1–3), e.g. 1.65.",
+			1,
+			3,
+			"0.05",
+			() => this.plugin.fb2Settings.lineHeight,
+			(n) => (this.plugin.fb2Settings.lineHeight = n)
+		);
+
+		new Setting(containerEl)
+			.setName("Drop caps")
+			.setDesc("Large initial letter at the first paragraph of each chapter.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.fb2Settings.dropCaps)
+					.onChange((value) => {
+						this.plugin.fb2Settings.dropCaps = value;
+						this.plugin.saveSettings();
+					})
+			);
+
+		// Reset button: restore defaults and re-render the tab so the
+		// controls show the new values.
+		new Setting(containerEl).addButton((btn) =>
+			btn.setButtonText("Reset to defaults").onClick(() => {
+				Object.assign(this.plugin.fb2Settings, DEFAULT_SETTINGS);
+				this.plugin.saveSettings();
+				this.display();
+			})
+		);
+	}
 }

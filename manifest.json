@@ -1,8 +1,8 @@
 {
 	"id": "fiction-book-reader",
 	"name": "FB2 Reader",
-	"version": "0.1.2",
-	"minAppVersion": "1.13.0",
+	"version": "0.1.3",
+	"minAppVersion": "1.7.2",
 	"description": "Read FictionBook (.fb2) files as formatted books with chapters, footnotes, images, and remembered reading positions.",
 	"author": "kvasonaft",
 	"isDesktopOnly": false
