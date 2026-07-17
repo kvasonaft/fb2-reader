@@ -1057,10 +1057,19 @@ class Fb2SettingTab extends PluginSettingTab {
 				action: () => {
 					Object.assign(this.plugin.fb2Settings, DEFAULT_SETTINGS);
 					this.plugin.saveSettings();
-					this.update(); // re-render with the restored values
+					this.refreshTab(); // re-render with the restored values
 				},
 			},
 		];
+	}
+
+	// Re-render the tab. SettingTab.update() exists only on Obsidian 1.13+
+	// (above our minAppVersion), so it is looked up at runtime; older
+	// versions re-render through display().
+	private refreshTab(): void {
+		const tab = this as unknown as { update?: () => void };
+		if (typeof tab.update === "function") tab.update();
+		else this.display();
 	}
 
 	getControlValue(key: string): unknown {
@@ -1094,7 +1103,7 @@ class Fb2SettingTab extends PluginSettingTab {
 			if (!this.fontsRequested) {
 				this.fontsRequested = true;
 				void getSystemFonts().then((families) => {
-					if (families.length) this.update();
+					if (families.length) this.refreshTab();
 				});
 			}
 			return {
