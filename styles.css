@@ -198,26 +198,6 @@ body.fb2-theme-sepia .fb2-reader a {
 	cursor: pointer;
 }
 
-/* Drop caps (enabled via the plugin setting): a large initial letter on the
-   opening paragraph of a chapter — the first paragraph of a section, or the
-   one right after the chapter title or epigraph. */
-body.fb2-dropcaps .fb2-section > .fb2-p:first-child::first-letter,
-body.fb2-dropcaps .fb2-title + .fb2-p::first-letter,
-body.fb2-dropcaps .fb2-epigraph + .fb2-p::first-letter {
-	float: left;
-	font-size: 3.2em;
-	line-height: 0.85;
-	padding-right: 0.08em;
-	font-weight: 600;
-}
-
-/* A drop-cap paragraph starts flush left: no first-line indent spacer. */
-body.fb2-dropcaps .fb2-section > .fb2-p:first-child::before,
-body.fb2-dropcaps .fb2-title + .fb2-p::before,
-body.fb2-dropcaps .fb2-epigraph + .fb2-p::before {
-	display: none;
-}
-
 .fb2-toc {
 	padding: 0.5em;
 }

@@ -71,7 +71,6 @@ interface Fb2Settings {
 	lineHeight: number; // line spacing multiplier
 	theme: Fb2Theme; // reader color theme
 	textColor: string; // text color ("" = follow the theme)
-	dropCaps: boolean; // large initial letter at chapter openings
 }
 
 // Everything the plugin persists to disk (Obsidian stores it in data.json).
@@ -87,7 +86,6 @@ const DEFAULT_SETTINGS: Fb2Settings = {
 	lineHeight: 1.5,
 	theme: "",
 	textColor: "",
-	dropCaps: false,
 };
 
 // Text color presets for the settings dropdown: "color code → label".
@@ -894,12 +892,7 @@ export default class Fb2ReaderPlugin extends Plugin {
 		body.style.removeProperty("--fb2-font-size");
 		body.style.removeProperty("--fb2-line-height");
 		body.style.removeProperty("--fb2-text-color");
-		body.removeClass(
-			"fb2-theme-dark",
-			"fb2-theme-light",
-			"fb2-theme-sepia",
-			"fb2-dropcaps"
-		);
+		body.removeClass("fb2-theme-dark", "fb2-theme-light", "fb2-theme-sepia");
 	}
 
 	// --- Settings ---
@@ -921,7 +914,6 @@ export default class Fb2ReaderPlugin extends Plugin {
 		body.toggleClass("fb2-theme-dark", s.theme === "dark");
 		body.toggleClass("fb2-theme-light", s.theme === "light");
 		body.toggleClass("fb2-theme-sepia", s.theme === "sepia");
-		body.toggleClass("fb2-dropcaps", s.dropCaps);
 		if (s.textColor) body.style.setProperty("--fb2-text-color", s.textColor);
 		else body.style.removeProperty("--fb2-text-color");
 	}
@@ -1082,11 +1074,6 @@ class Fb2SettingTab extends PluginSettingTab {
 							? undefined
 							: "Enter a number between 1 and 3.",
 				},
-			},
-			{
-				name: "Drop caps",
-				desc: "Large initial letter at the first paragraph of each chapter.",
-				control: { type: "toggle", key: "dropCaps", defaultValue: false },
 			},
 			{
 				name: "Reset to defaults",
@@ -1346,18 +1333,6 @@ class Fb2SettingTab extends PluginSettingTab {
 			() => this.plugin.fb2Settings.lineHeight,
 			(n) => (this.plugin.fb2Settings.lineHeight = n)
 		);
-
-		new Setting(containerEl)
-			.setName("Drop caps")
-			.setDesc("Large initial letter at the first paragraph of each chapter.")
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.fb2Settings.dropCaps)
-					.onChange((value) => {
-						this.plugin.fb2Settings.dropCaps = value;
-						this.plugin.saveSettings();
-					})
-			);
 
 		// Reset button: restore defaults and re-render the tab so the
 		// controls show the new values.
