@@ -284,7 +284,6 @@ class Fb2View extends FileView {
 	private bookTitle = ""; // book title (used for the tab header)
 	private binaries = new Map<string, string>(); // book images: id → data URL
 	private collectToc = false; // whether TOC entries are being collected right now
-	private jumpOrigin: HTMLElement | null = null; // link that started the last footnote jump
 	private renderQueue: RenderJob[] = []; // blocks still waiting to be rendered
 	private renderPass = 0; // bumping this cancels an in-flight render
 	// Scroll fires dozens of times per second; saving once, 800 ms after
@@ -372,7 +371,6 @@ class Fb2View extends FileView {
 		this.clearBinaries();
 		this.tocItems = [];
 		this.bookTitle = "";
-		this.jumpOrigin = null;
 		this.contentEl.empty();
 	}
 
@@ -468,22 +466,12 @@ class Fb2View extends FileView {
 			this.renderQueue.push(...this.childJobs(body, bodyEl, 1, !isNotes));
 		}
 
-		// A single click handler for the whole book serves internal links
-		// (footnotes and cross-references): find the element with the matching
-		// data-fb2-id and smooth-scroll to it. The jump leaves a "↩" back link
-		// at the destination so the reader can return to where they were.
+		// A single click handler for the whole book serves internal
+		// cross-references: find the element with the matching data-fb2-id and
+		// smooth-scroll to it. Footnote references and their back links are not
+		// rendered as links (they navigated poorly), so they never reach here.
 		root.addEventListener("click", (evt) => {
 			const clicked = evt.target as HTMLElement;
-
-			const back = clicked.closest(".fb2-backref");
-			if (back) {
-				evt.preventDefault();
-				this.jumpOrigin?.scrollIntoView({ behavior: "smooth", block: "center" });
-				this.jumpOrigin = null;
-				back.remove();
-				return;
-			}
-
 			const link = clicked.closest("a[data-fb2-target]");
 			if (!link) return;
 			evt.preventDefault();
@@ -492,13 +480,6 @@ class Fb2View extends FileView {
 				`[data-fb2-id="${CSS.escape(target ?? "")}"]`
 			);
 			if (!(dest instanceof HTMLElement)) return;
-			root.querySelector(".fb2-backref")?.remove(); // only one back link at a time
-			this.jumpOrigin = link as HTMLElement;
-			dest.createEl("a", {
-				cls: "fb2-backref",
-				text: "↩",
-				attr: { href: "#", "aria-label": "Back to text" },
-			});
 			dest.scrollIntoView({ behavior: "smooth", block: "start" });
 		});
 
@@ -710,14 +691,27 @@ class Fb2View extends FileView {
 				break;
 			case "a": {
 				const href = getHref(el) ?? "";
-				// A footnote (type="note") is wrapped in <sup> so its number
-				// renders as a small superscript.
-				const isNote = el.getAttribute("type") === "note";
-				const host = isNote ? parent.createEl("sup") : parent;
-				const anchor = host.createEl("a", { cls: "fb2-link" });
+				// A footnote (type="note") renders as a plain superscript
+				// number with no link: the in-text reference and its back link
+				// navigated poorly, so footnotes are no longer clickable. Only
+				// the number is kept (any label like "note" is dropped), and it
+				// hugs the preceding word with no separating space.
+				if (el.getAttribute("type") === "note") {
+					const raw = (el.textContent ?? "").trim();
+					const marker = raw.match(/\d+/)?.[0] ?? raw;
+					// Trim a trailing space left by the preceding text so the
+					// superscript sits directly on the previous word.
+					const prev = parent.lastChild;
+					if (prev && prev.nodeType === Node.TEXT_NODE) {
+						prev.textContent = (prev.textContent ?? "").replace(/\s+$/, "");
+					}
+					parent.createEl("sup", { text: marker });
+					break;
+				}
+				const anchor = parent.createEl("a", { cls: "fb2-link" });
 				if (href.startsWith("#")) {
-					// Internal link (footnote or chapter): store the target in
-					// data-fb2-target — clicks are handled in renderBook.
+					// Internal cross-reference (e.g. chapter): store the target
+					// in data-fb2-target — clicks are handled in renderBook.
 					anchor.setAttribute("data-fb2-target", href.slice(1));
 					anchor.setAttribute("href", "#");
 				} else if (/^https?:\/\//i.test(href)) {

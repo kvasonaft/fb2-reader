@@ -190,14 +190,6 @@ body.fb2-theme-sepia .fb2-reader a {
 	color: var(--text-muted);
 }
 
-/* "Return to text" link left at the destination of a footnote jump. */
-.fb2-backref {
-	display: inline-block;
-	margin-left: 0.5em;
-	text-decoration: none;
-	cursor: pointer;
-}
-
 .fb2-toc {
 	padding: 0.5em;
 }
