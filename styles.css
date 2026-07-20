@@ -105,19 +105,15 @@ body.fb2-theme-solarized-dark .fb2-reader a {
 	margin: 0 auto;
 	padding: 0;
 	height: 100%;
-	column-fill: auto;
 	will-change: transform;
-	/* width, column-width and column-gap are set inline to build page-width
-	   columns with symmetric side margins. */
+	/* width, column-width, column-gap and column-fill are set inline (see
+	   recomputePagination) to build page-width columns with symmetric side
+	   margins. break-inside on media is likewise applied inline, keeping the
+	   CSS free of multi-column properties. */
 }
 
-/* Keep media that is taller/wider than a page from spilling across the break. */
-.fb2-reader.fb2-paged .fb2-image-block,
-.fb2-reader.fb2-paged .fb2-table {
-	break-inside: avoid;
-}
-
-.fb2-reader.fb2-paged .fb2-image-block img {
+/* Keep an image from overflowing a single page. */
+.fb2-reader.fb2-paged .fb2-image-block {
 	max-height: 100%;
 }
 

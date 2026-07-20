@@ -530,13 +530,14 @@ class Fb2View extends FileView {
 			this.counterEl?.remove();
 			this.counterEl = null;
 			// Drop the inline paged styles so scroll mode lays out normally.
-			if (this.bookEl) {
-				this.bookEl.style.transform = "";
-				this.bookEl.style.transition = "";
-				this.bookEl.style.width = "";
-				this.bookEl.style.columnWidth = "";
-				this.bookEl.style.columnGap = "";
-			}
+			this.bookEl?.setCssStyles({
+				transform: "",
+				transition: "",
+				width: "",
+				columnWidth: "",
+				columnGap: "",
+				columnFill: "",
+			});
 		}
 	}
 
@@ -559,9 +560,12 @@ class Fb2View extends FileView {
 			parseFloat(this.contentEl.win.getComputedStyle(book).fontSize) || 16;
 		const margin = Math.round(fs * 1.5);
 		const colW = Math.max(1, w - 2 * margin);
-		book.style.width = `${colW}px`;
-		book.style.columnWidth = `${colW}px`;
-		book.style.columnGap = `${2 * margin}px`;
+		book.setCssStyles({
+			width: `${colW}px`,
+			columnWidth: `${colW}px`,
+			columnGap: `${2 * margin}px`,
+			columnFill: "auto",
+		});
 		// Page count two ways and take the larger: scrollWidth is usually
 		// accurate, but the page of the last block is a reliable backstop if a
 		// browser under-reports the overflowing multicol width.
@@ -583,8 +587,10 @@ class Fb2View extends FileView {
 		this.pageIndex = Math.max(0, Math.min(page, this.pageCount - 1));
 		const book = this.bookEl;
 		if (!book) return;
-		book.style.transition = animate ? "transform 0.18s ease" : "none";
-		book.style.transform = `translateX(${-this.pageIndex * this.pageWidth()}px)`;
+		book.setCssStyles({
+			transition: animate ? "transform 0.18s ease" : "none",
+			transform: `translateX(${-this.pageIndex * this.pageWidth()}px)`,
+		});
 		this.updateCounter();
 		this.saveReadingPosition();
 	}
@@ -950,6 +956,8 @@ class Fb2View extends FileView {
 			case "table": {
 				// Copy <tr> rows and <td>/<th> cells over as they are.
 				const table = parent.createEl("table", { cls: "fb2-table" });
+				// Avoid splitting a table across a page break in paged mode.
+				table.setCssStyles({ breakInside: "avoid" });
 				for (const tr of Array.from(el.querySelectorAll("tr"))) {
 					const rowEl = table.createEl("tr");
 					for (const cell of Array.from(tr.children)) {
@@ -1059,6 +1067,8 @@ class Fb2View extends FileView {
 		img.src = src;
 		const alt = el.getAttribute("alt");
 		if (alt) img.alt = alt;
+		// Block images shouldn't be split across a page break in paged mode.
+		if (cls === "fb2-image-block") img.setCssStyles({ breakInside: "avoid" });
 	}
 }
 
@@ -1121,7 +1131,7 @@ class Fb2TocView extends ItemView {
 				text: item.text || "(untitled)",
 			});
 			// Indentation grows with depth to show chapter nesting.
-			row.style.paddingLeft = `${(item.depth - 1) * 14 + 6}px`;
+			row.setCssStyles({ paddingLeft: `${(item.depth - 1) * 14 + 6}px` });
 			// Click: reveal the book tab and scroll to the chapter.
 			row.addEventListener("click", () => {
 				const src = this.source;
@@ -1519,13 +1529,14 @@ class Fb2SettingTab extends PluginSettingTab {
 					this.plugin.saveSettings();
 				});
 			const input = text.inputEl;
-			const datalist = input.ownerDocument.createElement("datalist");
-			datalist.id = "fb2-font-suggestions";
+			const host = input.parentElement;
+			if (!host) return;
+			const datalist = host.createEl("datalist", {
+				attr: { id: "fb2-font-suggestions" },
+			});
 			for (const family of suggestions) {
-				const option = datalist.createEl("option");
-				option.value = family;
+				datalist.createEl("option").value = family;
 			}
-			input.insertAdjacentElement("afterend", datalist);
 			input.setAttribute("list", datalist.id);
 		});
 	}
