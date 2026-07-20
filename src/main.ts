@@ -93,7 +93,7 @@ const TEXT_COLORS: Record<string, string> = {
 	"": "Default (theme)",
 	"#000000": "Black",
 	"#555555": "Dark gray",
-	"#c4c4c4": "Light gray",
+	"#9c9ca4": "Light gray",
 	"#ffffff": "White",
 	"#5b4636": "Sepia brown",
 };
