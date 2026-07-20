@@ -19,6 +19,7 @@ import {
 	debounce,
 	FileView,
 	ItemView,
+	Platform,
 	Plugin,
 	PluginSettingTab,
 	Setting,
@@ -214,6 +215,45 @@ async function getSystemFonts(): Promise<string[]> {
 		return []; // permission denied — do without the list
 	}
 }
+
+// Standard reading fonts shipped with iOS and iPadOS. Unlike desktop
+// Chromium, WebKit (the only engine on iOS/iPadOS) exposes no
+// queryLocalFonts API, so the installed fonts can't be enumerated there.
+// These names are offered as suggestions instead; any other installed font
+// can still be typed by hand.
+const IOS_SYSTEM_FONTS: string[] = [
+	"American Typewriter",
+	"Arial",
+	"Avenir",
+	"Avenir Next",
+	"Baskerville",
+	"Charter",
+	"Cochin",
+	"Courier New",
+	"Didot",
+	"Futura",
+	"Georgia",
+	"Gill Sans",
+	"Helvetica Neue",
+	"Hoefler Text",
+	"Iowan Old Style",
+	"Marker Felt",
+	"Menlo",
+	"Noteworthy",
+	"Optima",
+	"Palatino",
+	"Seravek",
+	"Times New Roman",
+	"Trebuchet MS",
+	"Verdana",
+];
+
+// Shown on iOS/iPadOS in place of the font dropdown, explaining why the
+// system font list is missing and how to proceed.
+const IOS_FONT_DESC =
+	"On iPhone and iPad the installed fonts can't be listed. Pick one of the " +
+	"standard system fonts, or type the exact name of any font installed on " +
+	"your device. Leave empty to use the Obsidian theme font.";
 
 // Extracts the link target from an FB2 element. Real-world books spell the
 // attribute in different ways (xlink:href, l:href, plain href), so try
@@ -1100,6 +1140,16 @@ class Fb2SettingTab extends PluginSettingTab {
 	private fontDefinition(): SettingDefinitionItem {
 		const fonts = cachedSystemFonts;
 		if (!fonts) {
+			// iOS/iPadOS can't enumerate fonts: offer the standard system
+			// fonts as suggestions while still allowing a custom name.
+			if (Platform.isIosApp) {
+				return {
+					name: "Font",
+					desc: IOS_FONT_DESC,
+					render: (setting) =>
+						this.addFontSuggestInput(setting, IOS_SYSTEM_FONTS),
+				};
+			}
 			if (!this.fontsRequested) {
 				this.fontsRequested = true;
 				void getSystemFonts().then((families) => {
@@ -1132,6 +1182,30 @@ class Fb2SettingTab extends PluginSettingTab {
 				options,
 			},
 		};
+	}
+
+	// Font input backed by a <datalist>: a dropdown of the given suggestions
+	// that still accepts any typed value. Used on iOS/iPadOS, where the
+	// installed fonts can't be queried.
+	private addFontSuggestInput(setting: Setting, suggestions: string[]): void {
+		setting.addText((text) => {
+			text
+				.setPlaceholder("Same as Obsidian")
+				.setValue(this.plugin.fb2Settings.fontFamily)
+				.onChange((value) => {
+					this.plugin.fb2Settings.fontFamily = value.trim();
+					this.plugin.saveSettings();
+				});
+			const input = text.inputEl;
+			const datalist = input.ownerDocument.createElement("datalist");
+			datalist.id = "fb2-font-suggestions";
+			for (const family of suggestions) {
+				const option = datalist.createEl("option");
+				option.value = family;
+			}
+			input.insertAdjacentElement("afterend", datalist);
+			input.setAttribute("list", datalist.id);
+		});
 	}
 
 	// --- Imperative fallback for Obsidian older than 1.13 ---
@@ -1218,8 +1292,9 @@ class Fb2SettingTab extends PluginSettingTab {
 				});
 			});
 
-		// Font: a dropdown when the system font list is available, otherwise
-		// (no permission, unsupported platform) a plain text field.
+		// Font: a dropdown when the system font list is available; on
+		// iOS/iPadOS a text field with a datalist of standard system fonts;
+		// otherwise (no permission, unsupported platform) a plain text field.
 		const fontSetting = new Setting(containerEl).setName("Font");
 		if (fonts.length) {
 			fontSetting.setDesc("Font used for book text.").addDropdown((dd) => {
@@ -1234,6 +1309,11 @@ class Fb2SettingTab extends PluginSettingTab {
 					this.plugin.saveSettings();
 				});
 			});
+		} else if (Platform.isIosApp) {
+			// iOS/iPadOS can't enumerate fonts: offer the standard system
+			// fonts as suggestions while still allowing a custom name.
+			fontSetting.setDesc(IOS_FONT_DESC);
+			this.addFontSuggestInput(fontSetting, IOS_SYSTEM_FONTS);
 		} else {
 			fontSetting
 				.setDesc(
