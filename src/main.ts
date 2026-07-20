@@ -768,7 +768,7 @@ class Fb2TocView extends ItemView {
 	}
 
 	getIcon(): string {
-		return "list";
+		return "book-open"; // match the reader view's book icon
 	}
 
 	async onOpen(): Promise<void> {
