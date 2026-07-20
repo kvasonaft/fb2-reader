@@ -1,5 +1,9 @@
 .fb2-reader {
 	overflow-y: auto;
+	/* Obsidian sets user-select: none on its UI chrome; custom views inherit
+	   it, which blocks selecting and copying book text. Re-enable it here. */
+	-webkit-user-select: text;
+	user-select: text;
 }
 
 /* Forced color schemes for the reading area. Obsidian theme variables are
