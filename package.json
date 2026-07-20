@@ -1,6 +1,6 @@
 {
 	"name": "fiction-book-reader",
-	"version": "0.1.4",
+	"version": "0.2.0",
 	"description": "Read FictionBook (.fb2) files as formatted books with chapters, footnotes, images, and remembered reading positions.",
 	"main": "main.js",
 	"scripts": {
