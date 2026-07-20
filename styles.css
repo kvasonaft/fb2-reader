@@ -46,9 +46,26 @@ body.fb2-theme-sepia .fb2-reader {
 	--background-modifier-hover: rgba(91, 70, 54, 0.08);
 }
 
+/* Solarized Dark (Ethan Schoonover): base03 background, base0 body text,
+   base01 muted, blue accent for links. */
+body.fb2-theme-solarized-dark .fb2-reader {
+	--background-primary: #002b36;
+	--background-secondary: #002b36;
+	background-color: #002b36;
+	color: #839496;
+	--text-normal: #839496;
+	--text-muted: #586e75;
+	--text-error: #dc322f;
+	--link-color: #268bd2;
+	--link-external-color: #268bd2;
+	--background-modifier-border: #073642;
+	--background-modifier-hover: rgba(147, 161, 161, 0.1);
+}
+
 body.fb2-theme-dark .fb2-reader a,
 body.fb2-theme-light .fb2-reader a,
-body.fb2-theme-sepia .fb2-reader a {
+body.fb2-theme-sepia .fb2-reader a,
+body.fb2-theme-solarized-dark .fb2-reader a {
 	color: var(--link-color);
 }
 

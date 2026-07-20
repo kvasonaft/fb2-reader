@@ -62,7 +62,7 @@ interface ReadingPosition {
 }
 
 // Reader color theme; the empty string means "same as Obsidian".
-type Fb2Theme = "" | "light" | "dark" | "sepia";
+type Fb2Theme = "" | "light" | "dark" | "sepia" | "solarized-dark";
 
 // All user-facing plugin settings.
 interface Fb2Settings {
@@ -96,6 +96,7 @@ const TEXT_COLORS: Record<string, string> = {
 	"#9c9ca4": "Light gray",
 	"#ffffff": "White",
 	"#5b4636": "Sepia brown",
+	"#839496": "Solarized",
 };
 
 // ---------------------------------------------------------------------------
@@ -886,7 +887,12 @@ export default class Fb2ReaderPlugin extends Plugin {
 		body.style.removeProperty("--fb2-font-size");
 		body.style.removeProperty("--fb2-line-height");
 		body.style.removeProperty("--fb2-text-color");
-		body.removeClass("fb2-theme-dark", "fb2-theme-light", "fb2-theme-sepia");
+		body.removeClass(
+			"fb2-theme-dark",
+			"fb2-theme-light",
+			"fb2-theme-sepia",
+			"fb2-theme-solarized-dark"
+		);
 	}
 
 	// --- Settings ---
@@ -908,6 +914,7 @@ export default class Fb2ReaderPlugin extends Plugin {
 		body.toggleClass("fb2-theme-dark", s.theme === "dark");
 		body.toggleClass("fb2-theme-light", s.theme === "light");
 		body.toggleClass("fb2-theme-sepia", s.theme === "sepia");
+		body.toggleClass("fb2-theme-solarized-dark", s.theme === "solarized-dark");
 		if (s.textColor) body.style.setProperty("--fb2-text-color", s.textColor);
 		else body.style.removeProperty("--fb2-text-color");
 	}
@@ -1023,6 +1030,7 @@ class Fb2SettingTab extends PluginSettingTab {
 						light: "Light",
 						dark: "Dark",
 						sepia: "Sepia",
+						"solarized-dark": "Solarized dark",
 					},
 				},
 			},
@@ -1242,6 +1250,7 @@ class Fb2SettingTab extends PluginSettingTab {
 					.addOption("light", "Light")
 					.addOption("dark", "Dark")
 					.addOption("sepia", "Sepia")
+					.addOption("solarized-dark", "Solarized dark")
 					.setValue(this.plugin.fb2Settings.theme)
 					.onChange((value) => {
 						this.plugin.fb2Settings.theme = value as Fb2Theme;
