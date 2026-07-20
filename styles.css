@@ -58,7 +58,7 @@ body.fb2-theme-sepia .fb2-reader a {
 	padding: 2em 1.5em 4em;
 	font-family: var(--fb2-font-family, inherit);
 	font-size: var(--fb2-font-size, 1.05em);
-	line-height: var(--fb2-line-height, 1.65);
+	line-height: var(--fb2-line-height, 1.5);
 	color: var(--fb2-text-color, inherit);
 }
 

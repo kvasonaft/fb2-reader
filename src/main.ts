@@ -83,8 +83,8 @@ interface Fb2Data {
 // Defaults used on first run and by the "Reset to defaults" button.
 const DEFAULT_SETTINGS: Fb2Settings = {
 	fontFamily: "",
-	fontSize: 17,
-	lineHeight: 1.65,
+	fontSize: 16,
+	lineHeight: 1.5,
 	theme: "",
 	textColor: "",
 	dropCaps: false,
@@ -1069,7 +1069,7 @@ class Fb2SettingTab extends PluginSettingTab {
 			},
 			{
 				name: "Line height",
-				desc: "Line spacing multiplier (1–3), e.g. 1.65.",
+				desc: "Line spacing multiplier (1–3), e.g. 1.5.",
 				control: {
 					type: "number",
 					key: "lineHeight",
@@ -1339,7 +1339,7 @@ class Fb2SettingTab extends PluginSettingTab {
 
 		this.addNumberSetting(
 			"Line height",
-			"Line spacing multiplier (1–3), e.g. 1.65.",
+			"Line spacing multiplier (1–3), e.g. 1.5.",
 			1,
 			3,
 			"0.05",
