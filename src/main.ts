@@ -64,6 +64,9 @@ interface ReadingPosition {
 // Reader color theme; the empty string means "same as Obsidian".
 type Fb2Theme = "" | "light" | "dark" | "sepia" | "solarized-dark";
 
+// Reading layout: the continuous scroll ("infinite page") or page-by-page.
+type ReadingMode = "scroll" | "paged";
+
 // All user-facing plugin settings.
 interface Fb2Settings {
 	fontFamily: string; // font ("" = same as Obsidian)
@@ -71,6 +74,7 @@ interface Fb2Settings {
 	lineHeight: number; // line spacing multiplier
 	theme: Fb2Theme; // reader color theme
 	textColor: string; // text color ("" = follow the theme)
+	readingMode: ReadingMode; // scroll (infinite page) or paged
 }
 
 // Everything the plugin persists to disk (Obsidian stores it in data.json).
@@ -86,6 +90,7 @@ const DEFAULT_SETTINGS: Fb2Settings = {
 	lineHeight: 1.5,
 	theme: "",
 	textColor: "",
+	readingMode: "scroll",
 };
 
 // Text color presets for the settings dropdown: "color code → label".
@@ -287,6 +292,16 @@ class Fb2View extends FileView {
 	private collectToc = false; // whether TOC entries are being collected right now
 	private renderQueue: RenderJob[] = []; // blocks still waiting to be rendered
 	private renderPass = 0; // bumping this cancels an in-flight render
+	// Paged mode: the columns layer, current/total pages, the "X of Y" overlay,
+	// a resize watcher, and the start point of an in-progress swipe.
+	private bookEl: HTMLElement | null = null;
+	private pageIndex = 0;
+	private pageCount = 1;
+	private counterEl: HTMLElement | null = null;
+	private resizeObserver: ResizeObserver | null = null;
+	private touchStartX = 0;
+	private touchStartY = 0;
+	private swiped = false; // suppress the click that follows a swipe
 	// Scroll fires dozens of times per second; saving once, 800 ms after
 	// scrolling settles, is enough.
 	private savePositionDebounced = debounce(
@@ -309,6 +324,31 @@ class Fb2View extends FileView {
 		this.registerDomEvent(this.contentEl, "scroll", () =>
 			this.savePositionDebounced()
 		);
+		// Paged-mode input. Every handler is a no-op in scroll mode. The
+		// content element is made focusable (tabindex -1) so it can receive
+		// key events once the reader is clicked.
+		this.contentEl.tabIndex = -1;
+		this.registerDomEvent(this.contentEl, "keydown", (e) => this.onKeyDown(e));
+		this.registerDomEvent(this.contentEl, "click", (e) => this.onViewClick(e));
+		this.registerDomEvent(
+			this.contentEl,
+			"touchstart",
+			(e) => this.onTouchStart(e),
+			{ passive: true }
+		);
+		this.registerDomEvent(this.contentEl, "touchend", (e) => this.onTouchEnd(e));
+		// Re-paginate when the reader area changes size (window resize, sidebar
+		// toggle, popout). Cheap no-op in scroll mode.
+		this.resizeObserver = new ResizeObserver(() => {
+			if (this.isPaged()) this.recomputePagination(true);
+		});
+		this.resizeObserver.observe(this.contentEl);
+	}
+
+	onunload(): void {
+		this.resizeObserver?.disconnect();
+		this.resizeObserver = null;
+		super.onunload();
 	}
 
 	getViewType(): string {
@@ -358,7 +398,10 @@ class Fb2View extends FileView {
 		// plugin (so it opens the TOC panel). Rendering is sliced across
 		// frames; the reading position is restored when the queue drains.
 		this.collectBinaries(doc);
-		this.renderBook(doc, container.createDiv({ cls: "fb2-book" }));
+		this.pageIndex = 0;
+		this.bookEl = container.createDiv({ cls: "fb2-book" });
+		this.applyModeClass();
+		this.renderBook(doc, this.bookEl);
 		this.plugin.onFb2Opened(this);
 	}
 
@@ -373,6 +416,10 @@ class Fb2View extends FileView {
 		this.tocItems = [];
 		this.bookTitle = "";
 		this.contentEl.empty();
+		this.bookEl = null;
+		this.counterEl = null;
+		this.pageIndex = 0;
+		this.pageCount = 1;
 	}
 
 	// --- Reading position ---
@@ -388,31 +435,256 @@ class Fb2View extends FileView {
 		);
 	}
 
-	// Save the position: find the first block visible on screen (its bottom
-	// edge below the top of the viewport) and remember its index.
-	private saveReadingPosition(file = this.file) {
-		if (!file) return;
-		const scroller = this.contentEl;
-		if (scroller.scrollTop <= 0) return; // at the very beginning — nothing to save
-		const top = scroller.getBoundingClientRect().top;
+	// Index of the first block currently in view — in scroll mode, the first
+	// whose bottom edge is below the top of the viewport.
+	private firstVisibleScrollIndex(): number {
+		const top = this.contentEl.getBoundingClientRect().top;
 		const index = this.getScrollBlocks().findIndex(
 			(b) => b.getBoundingClientRect().bottom > top
 		);
-		if (index >= 0) this.plugin.setPosition(file.path, index);
+		return index >= 0 ? index : 0;
 	}
 
-	// Restore the position: scroll to the block with the saved index.
+	// Save the position as a block index. Both modes store it the same way, so
+	// switching between scroll and paged keeps the reader's place.
+	private saveReadingPosition(file = this.file) {
+		if (!file) return;
+		if (this.isPaged()) {
+			this.savePagedPosition(file);
+			return;
+		}
+		if (this.contentEl.scrollTop <= 0) return; // at the very beginning
+		this.plugin.setPosition(file.path, this.firstVisibleScrollIndex());
+	}
+
+	// Restore the position: scroll to (or turn to the page of) the saved block.
 	private restoreReadingPosition(path: string) {
 		const pos = this.plugin.getPosition(path);
-		if (!pos || pos.index <= 0) return;
 		// By the next animation frame the browser has laid out all elements.
 		// contentEl.win is the window owning this view — the correct one
 		// when the reader lives in a popout window.
 		this.contentEl.win.requestAnimationFrame(() => {
 			const blocks = this.getScrollBlocks();
+			if (this.isPaged()) {
+				const idx = pos ? Math.min(pos.index, blocks.length - 1) : 0;
+				const target = blocks[Math.max(0, idx)];
+				this.goToPage(target ? this.pageOfElement(target) : 0, false);
+				return;
+			}
+			if (!pos || pos.index <= 0) return;
 			const target = blocks[Math.min(pos.index, blocks.length - 1)];
 			target?.scrollIntoView({ block: "start" });
 		});
+	}
+
+	// --- Paged mode ---
+	//
+	// The .fb2-book layer is laid out into full-width CSS columns of viewport
+	// height; each column is one page. Turning a page slides the layer left
+	// by one page width via a transform. All of this is inert in scroll mode.
+
+	isPaged(): boolean {
+		return this.plugin.fb2Settings.readingMode === "paged";
+	}
+
+	// Width of one page step in CSS pixels — the full viewport width. (The
+	// book layer itself is narrower, by the side margins, so pages are centered
+	// and neighbors stay off-screen.)
+	private pageWidth(): number {
+		return this.bookEl ? this.contentEl.clientWidth : 0;
+	}
+
+	// Which page a given element sits on. The book layer and the element are
+	// both shifted by the current transform, so their difference is the
+	// element's untranslated offset from the book's left edge.
+	private pageOfElement(el: HTMLElement): number {
+		const w = this.pageWidth();
+		if (!this.bookEl || w <= 0) return 0;
+		const bookLeft = this.bookEl.getBoundingClientRect().left;
+		const elLeft = el.getBoundingClientRect().left;
+		return Math.max(0, Math.round((elLeft - bookLeft) / w));
+	}
+
+	// Toggle the paged/scroll CSS class and create or drop the page counter.
+	private applyModeClass() {
+		const paged = this.isPaged();
+		this.contentEl.toggleClass("fb2-paged", paged);
+		if (paged) {
+			if (!this.counterEl) {
+				this.counterEl = this.contentEl.createDiv({ cls: "fb2-page-counter" });
+			}
+		} else {
+			this.counterEl?.remove();
+			this.counterEl = null;
+			// Drop the inline paged styles so scroll mode lays out normally.
+			if (this.bookEl) {
+				this.bookEl.style.transform = "";
+				this.bookEl.style.transition = "";
+				this.bookEl.style.width = "";
+				this.bookEl.style.columnWidth = "";
+				this.bookEl.style.columnGap = "";
+			}
+		}
+	}
+
+	// Measure the layout and update the page count. When `preserve` is set the
+	// current page is kept pointing at the same block across the reflow.
+	private recomputePagination(preserve: boolean) {
+		const book = this.bookEl;
+		if (!book || !this.isPaged()) return;
+		const anchor = preserve ? this.currentBlockIndex() : -1;
+		const w = this.contentEl.clientWidth; // viewport width = one page step
+		if (w <= 0) {
+			this.pageCount = 1;
+			return;
+		}
+		// Build columns one page-text wide (viewport minus symmetric margins),
+		// separated by a gap of twice the margin. The book layer is centered
+		// (margin: 0 auto), so each page sits with equal side margins and the
+		// neighboring columns fall entirely outside the clipped viewport.
+		const fs =
+			parseFloat(this.contentEl.win.getComputedStyle(book).fontSize) || 16;
+		const margin = Math.round(fs * 1.5);
+		const colW = Math.max(1, w - 2 * margin);
+		book.style.width = `${colW}px`;
+		book.style.columnWidth = `${colW}px`;
+		book.style.columnGap = `${2 * margin}px`;
+		// Page count two ways and take the larger: scrollWidth is usually
+		// accurate, but the page of the last block is a reliable backstop if a
+		// browser under-reports the overflowing multicol width.
+		const byScroll = Math.round(book.scrollWidth / w);
+		const blocks = this.getScrollBlocks();
+		const last = blocks[blocks.length - 1];
+		const byBlock = last ? this.pageOfElement(last) + 1 : 1;
+		this.pageCount = Math.max(1, byScroll, byBlock);
+		let page = this.pageIndex;
+		if (anchor >= 0) {
+			const el = blocks[Math.min(anchor, blocks.length - 1)];
+			page = el ? this.pageOfElement(el) : 0;
+		}
+		this.goToPage(page, false);
+	}
+
+	// Slide to a page (clamped to the valid range).
+	private goToPage(page: number, animate: boolean) {
+		this.pageIndex = Math.max(0, Math.min(page, this.pageCount - 1));
+		const book = this.bookEl;
+		if (!book) return;
+		book.style.transition = animate ? "transform 0.18s ease" : "none";
+		book.style.transform = `translateX(${-this.pageIndex * this.pageWidth()}px)`;
+		this.updateCounter();
+		this.saveReadingPosition();
+	}
+
+	private nextPage() {
+		this.goToPage(this.pageIndex + 1, true);
+	}
+
+	private prevPage() {
+		this.goToPage(this.pageIndex - 1, true);
+	}
+
+	// The first content block currently visible in the viewport. Uses actual
+	// on-screen geometry (not page math), so it stays correct even mid-reflow.
+	private currentBlockIndex(): number {
+		const rect = this.contentEl.getBoundingClientRect();
+		const blocks = this.getScrollBlocks();
+		const idx = blocks.findIndex((b) => {
+			const r = b.getBoundingClientRect();
+			return (
+				r.right > rect.left + 1 &&
+				r.left < rect.right - 1 &&
+				r.bottom > rect.top + 1
+			);
+		});
+		return idx >= 0 ? idx : 0;
+	}
+
+	private savePagedPosition(file = this.file) {
+		if (!file || this.pageIndex <= 0) return; // at the start — nothing to save
+		const idx = this.currentBlockIndex();
+		if (idx > 0) this.plugin.setPosition(file.path, idx);
+	}
+
+	private updateCounter() {
+		this.counterEl?.setText(`${this.pageIndex + 1} / ${this.pageCount}`);
+	}
+
+	// Reveal an element (TOC entry or cross-reference target) in either mode.
+	revealElement(el: HTMLElement) {
+		if (this.isPaged()) this.goToPage(this.pageOfElement(el), true);
+		else el.scrollIntoView({ behavior: "smooth", block: "start" });
+	}
+
+	// Called by the plugin after any settings change: switch layout if the
+	// reading mode flipped, and re-paginate (metrics may have changed).
+	onSettingsChanged() {
+		if (!this.bookEl) return;
+		const wasPaged = this.contentEl.hasClass("fb2-paged");
+		const anchor = wasPaged
+			? this.currentBlockIndex()
+			: this.firstVisibleScrollIndex();
+		this.applyModeClass();
+		this.contentEl.win.requestAnimationFrame(() => {
+			const blocks = this.getScrollBlocks();
+			const el = blocks[Math.min(anchor, blocks.length - 1)];
+			if (this.isPaged()) {
+				this.recomputePagination(false);
+				this.goToPage(el ? this.pageOfElement(el) : 0, false);
+			} else {
+				el?.scrollIntoView({ block: "start" });
+			}
+		});
+	}
+
+	// --- Paged mode: input ---
+
+	private onKeyDown(e: KeyboardEvent) {
+		if (!this.isPaged()) return;
+		if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " ") {
+			e.preventDefault();
+			this.nextPage();
+		} else if (e.key === "ArrowLeft" || e.key === "PageUp") {
+			e.preventDefault();
+			this.prevPage();
+		}
+	}
+
+	private onViewClick(e: MouseEvent) {
+		if (!this.isPaged()) return;
+		if (this.swiped) {
+			this.swiped = false; // this click is the tail of a swipe — ignore
+			return;
+		}
+		// Don't turn while selecting text or when a link was clicked.
+		const sel = this.contentEl.win.getSelection();
+		if (sel && !sel.isCollapsed) return;
+		if ((e.target as HTMLElement).closest("a")) return;
+		this.contentEl.focus({ preventScroll: true }); // enable keyboard paging
+		const rect = this.contentEl.getBoundingClientRect();
+		if (e.clientX - rect.left < rect.width / 2) this.prevPage();
+		else this.nextPage();
+	}
+
+	private onTouchStart(e: TouchEvent) {
+		if (!this.isPaged()) return;
+		this.swiped = false; // clear any stale swipe flag at the start of a touch
+		if (e.touches.length !== 1) return;
+		this.touchStartX = e.touches[0].clientX;
+		this.touchStartY = e.touches[0].clientY;
+	}
+
+	private onTouchEnd(e: TouchEvent) {
+		if (!this.isPaged()) return;
+		const t = e.changedTouches[0];
+		if (!t) return;
+		const dx = t.clientX - this.touchStartX;
+		const dy = t.clientY - this.touchStartY;
+		// Require a mostly-horizontal move past a threshold to count as a swipe.
+		if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
+		this.swiped = true;
+		if (dx < 0) this.nextPage();
+		else this.prevPage();
 	}
 
 	// --- Rendering ---
@@ -481,7 +753,7 @@ class Fb2View extends FileView {
 				`[data-fb2-id="${CSS.escape(target ?? "")}"]`
 			);
 			if (!(dest instanceof HTMLElement)) return;
-			dest.scrollIntoView({ behavior: "smooth", block: "start" });
+			this.revealElement(dest);
 		});
 
 		this.pumpRenderQueue(pass);
@@ -523,6 +795,7 @@ class Fb2View extends FileView {
 		}
 		this.collectToc = false;
 		this.plugin.updateToc(this);
+		if (this.isPaged()) this.recomputePagination(false);
 		if (this.file) this.restoreReadingPosition(this.file.path);
 	}
 
@@ -813,7 +1086,7 @@ class Fb2TocView extends ItemView {
 				const src = this.source;
 				if (!src) return;
 				void this.app.workspace.revealLeaf(src.leaf);
-				item.el.scrollIntoView({ behavior: "smooth", block: "start" });
+				src.revealElement(item.el);
 			});
 		}
 	}
@@ -922,7 +1195,17 @@ export default class Fb2ReaderPlugin extends Plugin {
 	// Apply and (deferred) save — called from the settings tab.
 	saveSettings() {
 		this.applySettings();
+		this.refreshReaders();
 		this.saveDataDebounced();
+	}
+
+	// Let every open reader react to a settings change: the reading mode may
+	// have flipped, or a metric (font, size, line height, theme) that affects
+	// where pages break may have changed.
+	private refreshReaders() {
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_FB2)) {
+			if (leaf.view instanceof Fb2View) leaf.view.onSettingsChanged();
+		}
 	}
 
 	// --- Reading positions ---
@@ -1031,6 +1314,19 @@ class Fb2SettingTab extends PluginSettingTab {
 						dark: "Dark",
 						sepia: "Sepia",
 						"solarized-dark": "Solarized dark",
+					},
+				},
+			},
+			{
+				name: "Reading mode",
+				desc: "Continuous scroll, or turn one page at a time.",
+				control: {
+					type: "dropdown",
+					key: "readingMode",
+					defaultValue: "scroll",
+					options: {
+						scroll: "Scroll (infinite page)",
+						paged: "Paged",
 					},
 				},
 			},
@@ -1254,6 +1550,21 @@ class Fb2SettingTab extends PluginSettingTab {
 					.setValue(this.plugin.fb2Settings.theme)
 					.onChange((value) => {
 						this.plugin.fb2Settings.theme = value as Fb2Theme;
+						this.plugin.saveSettings();
+					})
+			);
+
+		// Reading layout: continuous scroll or page-by-page.
+		new Setting(containerEl)
+			.setName("Reading mode")
+			.setDesc("Continuous scroll, or turn one page at a time.")
+			.addDropdown((dd) =>
+				dd
+					.addOption("scroll", "Scroll (infinite page)")
+					.addOption("paged", "Paged")
+					.setValue(this.plugin.fb2Settings.readingMode)
+					.onChange((value) => {
+						this.plugin.fb2Settings.readingMode = value as ReadingMode;
 						this.plugin.saveSettings();
 					})
 			);

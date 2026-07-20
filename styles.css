@@ -83,6 +83,57 @@ body.fb2-theme-solarized-dark .fb2-reader a {
 	color: var(--fb2-text-color, inherit);
 }
 
+/* --- Paged (page-by-page) reading mode ---
+   The viewport is clipped and framed with margins; the book layer is laid out
+   into full-width CSS columns (one column = one page) and slid horizontally by
+   a transform (set inline in JS) to turn pages. */
+.fb2-reader.fb2-paged {
+	overflow: hidden;
+	position: relative;
+	/* Only vertical margins here; the horizontal page margins are produced by
+	   the column geometry (see recomputePagination) so that neighboring pages
+	   never peek in at the sides. */
+	padding: 2em 0;
+}
+
+.fb2-reader.fb2-paged:focus {
+	outline: none;
+}
+
+.fb2-reader.fb2-paged .fb2-book {
+	max-width: none;
+	margin: 0 auto;
+	padding: 0;
+	height: 100%;
+	column-fill: auto;
+	will-change: transform;
+	/* width, column-width and column-gap are set inline to build page-width
+	   columns with symmetric side margins. */
+}
+
+/* Keep media that is taller/wider than a page from spilling across the break. */
+.fb2-reader.fb2-paged .fb2-image-block,
+.fb2-reader.fb2-paged .fb2-table {
+	break-inside: avoid;
+}
+
+.fb2-reader.fb2-paged .fb2-image-block img {
+	max-height: 100%;
+}
+
+/* "Page X of Y" indicator, centered in the bottom margin. */
+.fb2-page-counter {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0.5em;
+	text-align: center;
+	font-size: 0.75em;
+	color: var(--text-muted);
+	pointer-events: none;
+	user-select: none;
+}
+
 .fb2-title-page {
 	text-align: center;
 	margin-bottom: 3em;
