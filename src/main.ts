@@ -94,13 +94,9 @@ const DEFAULT_SETTINGS: Fb2Settings = {
 const TEXT_COLORS: Record<string, string> = {
 	"": "Default (theme)",
 	"#000000": "Black",
-	"#333333": "Charcoal",
 	"#555555": "Dark gray",
-	"#707070": "Medium gray",
-	"#8a8a8a": "Gray",
-	"#a6a6a6": "Silver gray",
 	"#c4c4c4": "Light gray",
-	"#e2e2e2": "Off-white",
+	"#ffffff": "White",
 	"#5b4636": "Sepia brown",
 };
 
