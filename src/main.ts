@@ -8,8 +8,8 @@
  *   4. Helper functions: encoding detection and the like.
  *   5. Fb2View — the reader itself, renders an FB2 file as a page.
  *   6. Fb2TocView — the table-of-contents side panel.
- *   7. Fb2ReaderPlugin — the conductor: registers the views,
- *      stores settings and reading positions.
+ *   7. Fb2ReaderPlugin — the conductor: registers the views, stores the
+ *      settings (data.json) and the reading positions (localStorage).
  *   8. Fb2SettingTab — the plugin settings tab.
  */
 
@@ -78,9 +78,24 @@ interface Fb2Settings {
 }
 
 // Everything the plugin persists to disk (Obsidian stores it in data.json).
+// Reading positions are deliberately NOT here — see POSITIONS_KEY.
 interface Fb2Data {
-	positions: Record<string, ReadingPosition>; // file path → reading position
 	settings: Fb2Settings;
+}
+
+// Reading positions are kept in the vault's localStorage rather than in
+// data.json, which makes them strictly device-local: localStorage is WebView
+// storage, not a file inside the vault, so no sync mechanism — Obsidian Sync,
+// iCloud, Syncthing, Git — can carry it to another device. Keeping them out of
+// data.json also means a synced data.json can no longer overwrite the whole
+// position table at once. The trade-off is that positions are not part of a
+// vault backup and are lost if Obsidian is reinstalled.
+const POSITIONS_KEY = "fb2-reader-positions";
+
+// Shape of data.json as written by older versions, which stored positions
+// there. Read once on load so they can be migrated, then dropped.
+interface LegacyFb2Data extends Partial<Fb2Data> {
+	positions?: Record<string, ReadingPosition>;
 }
 
 // Defaults used on first run and by the "Reset to defaults" button.
@@ -1075,20 +1090,25 @@ class Fb2TocView extends ItemView {
 // ---------------------------------------------------------------------------
 
 export default class Fb2ReaderPlugin extends Plugin {
-	// All plugin data (settings + reading positions).
-	private data: Fb2Data = { positions: {}, settings: { ...DEFAULT_SETTINGS } };
+	// Settings, persisted to data.json.
+	private data: Fb2Data = { settings: { ...DEFAULT_SETTINGS } };
+	// Reading positions (file path → position), held in memory and mirrored to
+	// localStorage. Never written to data.json — see POSITIONS_KEY.
+	private positions: Record<string, ReadingPosition> = {};
 	// Deferred saving: write to disk at most once per 2 seconds.
 	private saveDataDebounced = debounce(() => this.saveData(this.data), 2000, true);
+	// Same for positions, which change on every scroll.
+	private savePositionsDebounced = debounce(() => this.savePositions(), 2000, true);
 
 	async onload() {
 		// Load persisted data (data.json). Object.assign layers the stored
 		// settings over the defaults, so fields added in a plugin update
 		// still get values.
-		const stored = ((await this.loadData()) ?? {}) as Partial<Fb2Data>;
+		const stored = ((await this.loadData()) ?? {}) as LegacyFb2Data;
 		this.data = {
-			positions: stored.positions ?? {},
 			settings: Object.assign({}, DEFAULT_SETTINGS, stored.settings),
 		};
+		this.loadPositions(stored);
 		this.applySettings();
 
 		// Tell Obsidian how to create our views...
@@ -1130,6 +1150,8 @@ export default class Fb2ReaderPlugin extends Plugin {
 	// of our settings from <body> (CSS variables and theme classes).
 	onunload() {
 		void this.saveData(this.data);
+		this.savePositionsDebounced.cancel();
+		this.savePositions();
 		const body = document.body;
 		body.style.removeProperty("--fb2-font-family");
 		body.style.removeProperty("--fb2-font-size");
@@ -1186,22 +1208,42 @@ export default class Fb2ReaderPlugin extends Plugin {
 	// --- Reading positions ---
 
 	getPosition(path: string): ReadingPosition | undefined {
-		return this.data.positions[path];
+		return this.positions[path];
 	}
 
 	setPosition(path: string, index: number) {
-		this.data.positions[path] = { index, ts: Date.now() };
+		this.positions[path] = { index, ts: Date.now() };
 		this.prunePositions();
-		this.saveDataDebounced();
+		this.savePositionsDebounced();
 	}
 
-	// Keep positions for the 300 most recent books only, so data.json
+	// Reads the positions saved on this device. Versions up to 0.2.0 kept them
+	// in data.json; if such entries are still there they are moved over once
+	// and stripped from the file, so an update does not lose reading progress.
+	private loadPositions(stored: LegacyFb2Data) {
+		const local = this.app.loadLocalStorage(POSITIONS_KEY) as
+			| Record<string, ReadingPosition>
+			| null;
+		this.positions = local ?? {};
+		if (!stored.positions) return;
+		// Local entries win: they are this device's own, newer history.
+		this.positions = Object.assign({}, stored.positions, this.positions);
+		this.prunePositions();
+		this.savePositions();
+		void this.saveData(this.data); // rewrites data.json without positions
+	}
+
+	private savePositions() {
+		this.app.saveLocalStorage(POSITIONS_KEY, this.positions);
+	}
+
+	// Keep positions for the 300 most recent books only, so the stored table
 	// does not grow forever; the oldest entries are dropped.
 	private prunePositions() {
-		const entries = Object.entries(this.data.positions);
+		const entries = Object.entries(this.positions);
 		if (entries.length <= 300) return;
 		entries.sort((a, b) => b[1].ts - a[1].ts); // newest first
-		this.data.positions = Object.fromEntries(entries.slice(0, 300));
+		this.positions = Object.fromEntries(entries.slice(0, 300));
 	}
 
 	// --- TOC panel ---

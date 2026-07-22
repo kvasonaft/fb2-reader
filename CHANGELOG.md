@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Reading positions are now strictly device-local.** They moved out of the
+  plugin's `data.json` into this vault's local storage, so no synchronisation
+  method — Obsidian Sync, iCloud, Syncthing, Git — can carry them to another
+  device, and a synced `data.json` can no longer overwrite your whole
+  position table at once. Existing positions are migrated automatically on
+  first launch. Note that positions are no longer part of a vault backup and
+  are lost if Obsidian is reinstalled. Plugin settings are unaffected and
+  stay in `data.json`.
+- The minimum required Obsidian version is now **1.8.7**.
+
 ### Removed
 
 - **Swipe paging.** Touchscreen swipes and two-finger trackpad swipes no
