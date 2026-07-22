@@ -292,22 +292,13 @@ class Fb2View extends FileView {
 	private collectToc = false; // whether TOC entries are being collected right now
 	private renderQueue: RenderJob[] = []; // blocks still waiting to be rendered
 	private renderPass = 0; // bumping this cancels an in-flight render
-	// Paged mode: the columns layer, current/total pages, the "X of Y" overlay,
-	// a resize watcher, and the start point of an in-progress swipe.
+	// Paged mode: the columns layer, current/total pages, the "X of Y" overlay
+	// and a resize watcher.
 	private bookEl: HTMLElement | null = null;
 	private pageIndex = 0;
 	private pageCount = 1;
 	private counterEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
-	private touchStartX = 0;
-	private touchStartY = 0;
-	private swiped = false; // suppress the click that follows a swipe
-	// Trackpad (wheel deltaX) paging: accumulate a gesture, turn exactly one
-	// page, then stay locked until the whole event burst (including momentum)
-	// stops — guaranteeing at most one page per swipe.
-	private wheelAccum = 0;
-	private wheelLocked = false;
-	private wheelResetTimer = 0;
 	// Scroll fires dozens of times per second; saving once, 800 ms after
 	// scrolling settles, is enough.
 	private savePositionDebounced = debounce(
@@ -336,19 +327,6 @@ class Fb2View extends FileView {
 		this.contentEl.tabIndex = -1;
 		this.registerDomEvent(this.contentEl, "keydown", (e) => this.onKeyDown(e));
 		this.registerDomEvent(this.contentEl, "click", (e) => this.onViewClick(e));
-		this.registerDomEvent(
-			this.contentEl,
-			"touchstart",
-			(e) => this.onTouchStart(e),
-			{ passive: true }
-		);
-		this.registerDomEvent(this.contentEl, "touchend", (e) => this.onTouchEnd(e));
-		// Trackpad two-finger horizontal swipe on macOS arrives as wheel events
-		// with deltaX. Registered non-passive so the default history-swipe can
-		// be prevented.
-		this.registerDomEvent(this.contentEl, "wheel", (e) => this.onWheel(e), {
-			passive: false,
-		});
 		// Re-paginate when the reader area changes size (window resize, sidebar
 		// toggle, popout). Cheap no-op in scroll mode.
 		this.resizeObserver = new ResizeObserver(() => {
@@ -360,7 +338,6 @@ class Fb2View extends FileView {
 	onunload(): void {
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
-		this.contentEl.win.clearTimeout(this.wheelResetTimer);
 		super.onunload();
 	}
 
@@ -671,10 +648,6 @@ class Fb2View extends FileView {
 
 	private onViewClick(e: MouseEvent) {
 		if (!this.isPaged()) return;
-		if (this.swiped) {
-			this.swiped = false; // this click is the tail of a swipe — ignore
-			return;
-		}
 		// Don't turn while selecting text or when a link was clicked.
 		const sel = this.contentEl.win.getSelection();
 		if (sel && !sel.isCollapsed) return;
@@ -683,55 +656,6 @@ class Fb2View extends FileView {
 		const rect = this.contentEl.getBoundingClientRect();
 		if (e.clientX - rect.left < rect.width / 2) this.prevPage();
 		else this.nextPage();
-	}
-
-	private onTouchStart(e: TouchEvent) {
-		if (!this.isPaged()) return;
-		this.swiped = false; // clear any stale swipe flag at the start of a touch
-		if (e.touches.length !== 1) return;
-		this.touchStartX = e.touches[0].clientX;
-		this.touchStartY = e.touches[0].clientY;
-	}
-
-	private onTouchEnd(e: TouchEvent) {
-		if (!this.isPaged()) return;
-		const t = e.changedTouches[0];
-		if (!t) return;
-		const dx = t.clientX - this.touchStartX;
-		const dy = t.clientY - this.touchStartY;
-		// Require a mostly-horizontal move past a threshold to count as a swipe.
-		if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
-		this.swiped = true;
-		if (dx < 0) this.nextPage();
-		else this.prevPage();
-	}
-
-	// Trackpad two-finger horizontal swipe (macOS and elsewhere): the OS sends
-	// a continuous burst of wheel events with deltaX — the user phase followed
-	// by a decaying momentum tail, spaced only ~16 ms apart. We turn one page
-	// when the gesture passes a threshold, then stay locked; the reset timer is
-	// restarted by every event, so it only fires once the burst has fully
-	// stopped. That guarantees a single swipe never turns more than one page.
-	private onWheel(e: WheelEvent) {
-		if (!this.isPaged()) return;
-		if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // not horizontal
-		// Suppress the browser's back/forward overscroll navigation.
-		e.preventDefault();
-		const win = this.contentEl.win;
-		win.clearTimeout(this.wheelResetTimer);
-		this.wheelResetTimer = win.setTimeout(() => {
-			this.wheelLocked = false;
-			this.wheelAccum = 0;
-		}, 100);
-		if (this.wheelLocked) return; // already turned for this gesture
-		this.wheelAccum += e.deltaX;
-		if (Math.abs(this.wheelAccum) < 40) return;
-		this.wheelLocked = true;
-		// deltaX > 0 is a forward (rightward) scroll, regardless of the OS
-		// natural-scroll setting, so it maps to the next page.
-		if (this.wheelAccum > 0) this.nextPage();
-		else this.prevPage();
-		this.wheelAccum = 0;
 	}
 
 	// --- Rendering ---
