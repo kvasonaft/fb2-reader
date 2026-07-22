@@ -813,11 +813,32 @@ class Fb2View extends FileView {
 		}
 	}
 
-	// Pushes the bottom of a page down by `height` pixels: finds the first
-	// block that would end up underneath the note block and inserts a spacer
-	// filling the rest of the column in front of it, so it breaks to the next
-	// page. Returns null when the page has no block to push (a note taller
-	// than the page it belongs to), in which case the note simply overlaps.
+	// Where an element sits vertically on one given page, in pixels from the
+	// top of the page. A block that continues onto the next page is split into
+	// fragments, and getBoundingClientRect then reports the union of them —
+	// top 0, bottom the full page height — which says nothing about where the
+	// block actually starts. getClientRects returns the fragments separately,
+	// so the one standing on this page is picked out by its column.
+	private fragmentOnPage(
+		el: HTMLElement,
+		page: number
+	): { top: number; bottom: number } | null {
+		const book = this.bookEl;
+		const w = this.pageWidth();
+		if (!book || w <= 0) return null;
+		const origin = book.getBoundingClientRect();
+		for (const r of Array.from(el.getClientRects())) {
+			if (Math.floor((r.left - origin.left + 1) / w) !== page) continue;
+			return { top: r.top - origin.top, bottom: r.bottom - origin.top };
+		}
+		return null;
+	}
+
+	// Pushes the bottom of a page up by `height` pixels: finds the first block
+	// that would end up underneath the note block and inserts a spacer filling
+	// the rest of the column in front of it, so it breaks to the next page.
+	// Returns null when there is nothing to push, in which case the note block
+	// simply covers the last lines of the page.
 	private reserveSpace(
 		blocks: HTMLElement[],
 		page: number,
@@ -826,35 +847,36 @@ class Fb2View extends FileView {
 		const book = this.bookEl;
 		if (!book) return null;
 		const pageHeight = book.clientHeight;
-		const bookTop = book.getBoundingClientRect().top;
 		const limit = pageHeight - height; // text has to end above this
 		const first = this.firstBlockOnPage(blocks, page);
 		if (first < 0) return null;
 		let victim = -1;
+		let top = 0;
 		for (let i = first; i < blocks.length; i++) {
 			if (this.pageOfElement(blocks[i]) !== page) break;
-			if (blocks[i].getBoundingClientRect().bottom - bookTop > limit) {
+			const box = this.fragmentOnPage(blocks[i], page);
+			if (!box) continue;
+			if (box.bottom > limit) {
 				victim = i;
+				top = box.top;
 				break;
 			}
 		}
 		if (victim < 0) return null;
 		// A block whose own top already sits inside the reserved band leaves
 		// too little room; step back so the note still fits.
-		while (
-			victim > first &&
-			pageHeight - (blocks[victim].getBoundingClientRect().top - bookTop) < height
-		) {
+		while (victim > first && pageHeight - top < height) {
+			const box = this.fragmentOnPage(blocks[victim - 1], page);
+			if (!box) break;
 			victim--;
+			top = box.top;
 		}
-		const target = blocks[victim];
-		const top = target.getBoundingClientRect().top - bookTop;
 		const spacer = createDiv({ cls: "fb2-note-spacer" });
 		// One pixel short of the column bottom: an exact fit is at the mercy of
-		// sub-pixel rounding, and a spacer a hair too tall would spill onto the
-		// next page and reserve room there instead.
+		// sub-pixel rounding, and a spacer a hair too tall spills onto the next
+		// page as a band of blank lines.
 		spacer.setCssStyles({ height: `${Math.max(1, pageHeight - top - 1)}px` });
-		target.parentElement?.insertBefore(spacer, target);
+		blocks[victim].parentElement?.insertBefore(spacer, blocks[victim]);
 		return spacer;
 	}
 

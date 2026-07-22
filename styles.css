@@ -278,6 +278,10 @@ body.fb2-theme-solarized-dark .fb2-reader a {
 	overflow: hidden;
 	padding-top: 0.4em;
 	border-top: 1px solid var(--text-muted);
+	/* Opaque, so that in the rare case where no room could be reserved (a note
+	   taller than the page, or a single paragraph filling the whole page) the
+	   note covers the text underneath instead of printing over it. */
+	background: var(--background-primary);
 	/* A pixel smaller than the book text, and as muted as the annotation. */
 	font-size: calc(var(--fb2-font-size, 1.05em) - 1px);
 	color: var(--text-muted);
