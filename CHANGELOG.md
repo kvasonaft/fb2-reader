@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Footnotes at the foot of the page.** In paged mode the text of each note
+  is printed at the bottom of the very page its marker appears on, ruled off
+  from the text above it, one pixel smaller than the book text and in the same
+  muted colour as the book's annotation. The collected notes section at the
+  end of the book is hidden in paged mode, since every note is now shown in
+  place; scroll mode, which has no pages, keeps it as before.
+
 ### Changed
 
 - **Reading positions are now strictly device-local.** They moved out of the

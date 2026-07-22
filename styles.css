@@ -106,6 +106,8 @@ body.fb2-theme-solarized-dark .fb2-reader a {
 	padding: 0;
 	height: 100%;
 	will-change: transform;
+	/* Anchors the page-foot note blocks, which are positioned per page. */
+	position: relative;
 	/* width, column-width, column-gap and column-fill are set inline (see
 	   recomputePagination) to build page-width columns with symmetric side
 	   margins. break-inside on media is likewise applied inline, keeping the
@@ -256,6 +258,57 @@ body.fb2-theme-solarized-dark .fb2-reader a {
 	margin-top: 3em;
 	font-size: 0.9em;
 	color: var(--text-muted);
+}
+
+/* --- Footnotes at the foot of the page (paged mode only) --- */
+
+/* Each note is reprinted under the page its marker sits on, so the collected
+   notes body at the end of the book would only repeat them. */
+.fb2-reader.fb2-paged .fb2-notes {
+	display: none;
+}
+
+/* One block per page, parked over that page by JS (left is set inline) and
+   ruled off from the text above it. */
+.fb2-page-notes {
+	position: absolute;
+	bottom: 0;
+	width: 100%;
+	max-height: 60%;
+	overflow: hidden;
+	padding-top: 0.4em;
+	border-top: 1px solid var(--text-muted);
+	/* A pixel smaller than the book text, and as muted as the annotation. */
+	font-size: calc(var(--fb2-font-size, 1.05em) - 1px);
+	color: var(--text-muted);
+	text-align: left;
+}
+
+.fb2-note + .fb2-note {
+	margin-top: 0.3em;
+}
+
+.fb2-note-num {
+	margin-right: 0.35em;
+}
+
+.fb2-note-p {
+	margin: 0;
+	hyphens: auto;
+}
+
+/* The first paragraph runs on from the note's number instead of starting on
+   a line of its own. */
+.fb2-note-p:first-of-type {
+	display: inline;
+}
+
+/* Fills the rest of a column so the text underneath it breaks to the next
+   page, leaving room for the note block. Deliberately breakable: if rounding
+   ever makes it a pixel too tall, it should spill that pixel rather than jump
+   to the next page as a whole. */
+.fb2-note-spacer {
+	pointer-events: none;
 }
 
 .fb2-toc {
