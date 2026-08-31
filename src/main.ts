@@ -635,9 +635,9 @@ class Fb2View extends FileView {
 	// How it works: a note block is an absolutely positioned child of the book
 	// layer — an absolutely positioned child of a multi-column container is not
 	// fragmented into columns, so it can be parked over any single page — and
-	// the room it needs is taken out of the text flow by a spacer inserted
-	// before the first block that would otherwise sit underneath it, pushing
-	// that block onto the next page.
+	// the room it needs is taken out of the text flow by a spacer inserted at
+	// the line where the text has to stop, breaking everything below it to the
+	// next page.
 	//
 	// Pages must be processed strictly in order: reserving room on page N
 	// reflows everything after it and so changes which page later markers land
@@ -662,7 +662,12 @@ class Fb2View extends FileView {
 		for (const el of Array.from(
 			this.bookEl.querySelectorAll(".fb2-page-notes, .fb2-note-spacer")
 		)) {
+			// A spacer sits in the middle of a paragraph, between the two
+			// halves of a text node it was inserted into; normalize joins them
+			// back so repeated layouts do not shred the text into fragments.
+			const parent = el.parentElement;
 			el.remove();
+			parent?.normalize();
 		}
 	}
 
@@ -834,11 +839,13 @@ class Fb2View extends FileView {
 		return null;
 	}
 
-	// Pushes the bottom of a page up by `height` pixels: finds the first block
-	// that would end up underneath the note block and inserts a spacer filling
-	// the rest of the column in front of it, so it breaks to the next page.
-	// Returns null when there is nothing to push, in which case the note block
-	// simply covers the last lines of the page.
+	// Clears the bottom `height` pixels of a page for the note block: finds
+	// where the text first reaches into that band and inserts a spacer filling
+	// the rest of the column, so everything from there on breaks to the next
+	// page. The spacer goes inside the paragraph, at the line the text has to
+	// stop at, so a long paragraph loses only the lines that are in the way.
+	// Returns null when the page already has the room the note needs, or when
+	// nothing can be moved — in which case the note covers the last lines.
 	private reserveSpace(
 		blocks: HTMLElement[],
 		page: number,
@@ -849,35 +856,174 @@ class Fb2View extends FileView {
 		const pageHeight = book.clientHeight;
 		const limit = pageHeight - height; // text has to end above this
 		const first = this.firstBlockOnPage(blocks, page);
-		if (first < 0) return null;
-		let victim = -1;
-		let top = 0;
-		for (let i = first; i < blocks.length; i++) {
-			if (this.pageOfElement(blocks[i]) !== page) break;
-			const box = this.fragmentOnPage(blocks[i], page);
-			if (!box) continue;
-			if (box.bottom > limit) {
-				victim = i;
-				top = box.top;
-				break;
-			}
-		}
-		if (victim < 0) return null;
-		// A block whose own top already sits inside the reserved band leaves
-		// too little room; step back so the note still fits.
-		while (victim > first && pageHeight - top < height) {
-			const box = this.fragmentOnPage(blocks[victim - 1], page);
-			if (!box) break;
-			victim--;
-			top = box.top;
-		}
-		const spacer = createDiv({ cls: "fb2-note-spacer" });
+		// Start one block early: the block before the first one of this page
+		// may flow in from the previous page and reach into the note band all
+		// the same. When no block starts on this page at all, the page is the
+		// middle of one long block, and that block is the only candidate.
+		const start =
+			first >= 0
+				? Math.max(0, first - 1)
+				: this.lastBlockBeforePage(blocks, page);
+		if (start < 0) return null;
 		// One pixel short of the column bottom: an exact fit is at the mercy of
 		// sub-pixel rounding, and a spacer a hair too tall spills onto the next
 		// page as a band of blank lines.
-		spacer.setCssStyles({ height: `${Math.max(1, pageHeight - top - 1)}px` });
-		blocks[victim].parentElement?.insertBefore(spacer, blocks[victim]);
-		return spacer;
+		const spacerTo = (from: number) => {
+			const spacer = createDiv({ cls: "fb2-note-spacer" });
+			spacer.setCssStyles({ height: `${Math.max(1, pageHeight - from - 1)}px` });
+			return spacer;
+		};
+
+		for (let i = start; i < blocks.length; i++) {
+			if (this.pageOfElement(blocks[i]) > page) break;
+			const box = this.fragmentOnPage(blocks[i], page);
+			// The box of a block continuing onto the next page runs to the
+			// bottom of the column whatever its text does, so a block is only
+			// really in the way once breakPointInBlock says so.
+			if (!box || box.bottom <= limit) continue;
+			// A chapter heading is never broken mid-line; pushing it whole
+			// (the null path below) reads far better.
+			const at = blocks[i].hasClass("fb2-title")
+				? null
+				: this.breakPointInBlock(blocks[i], page, limit);
+			if (at === "clear") continue; // its text stops above the note
+
+			// Break the paragraph at the last line that still fits and put the
+			// spacer there, so only the lines in the way move to the next page.
+			// Pushing the whole paragraph instead would cost up to a page of
+			// blank space for the long paragraphs a novel is made of.
+			if (at) {
+				const spacer = spacerTo(at.top);
+				at.range.insertNode(spacer);
+				return spacer;
+			}
+
+			// No usable break point (an image, or a break at the very start of
+			// the block): push the whole block — unless it flows in from the
+			// previous page, where a spacer in front of it would reshape a page
+			// that is already done.
+			if (this.pageOfElement(blocks[i]) !== page) continue;
+			// A block whose own top already sits inside the reserved band
+			// leaves too little room, so step back until the note fits.
+			let victim = i;
+			let top = box.top;
+			while (victim > first && pageHeight - top < height) {
+				const prev = this.fragmentOnPage(blocks[victim - 1], page);
+				if (!prev) break;
+				victim--;
+				top = prev.top;
+			}
+			const spacer = spacerTo(top);
+			blocks[victim].parentElement?.insertBefore(spacer, blocks[victim]);
+			return spacer;
+		}
+		return null; // the page already has all the room the note needs
+	}
+
+	// The point inside a block where its text has to stop for the note to fit:
+	// the start of the first line on this page reaching below `limit`, as a
+	// collapsed range together with that line's top. Answers "clear" when the
+	// block's text already stops above the note, and null when there is no
+	// line to break at — no text at all (an image), or the break would land at
+	// the very start of the block — so the caller pushes the block instead.
+	//
+	// The line is found by bisecting the block's text, measuring the rect of
+	// one character at a time. Not a collapsed caret: at a line wrap a caret
+	// rect is ambiguous between the end of one line and the start of the next,
+	// and picking the wrong one strands a lone character above the spacer and
+	// spills a band of blank lines onto the next page. Position only ever
+	// grows along the text, so a dozen measurements are enough however long
+	// the paragraph is.
+	private breakPointInBlock(
+		el: HTMLElement,
+		page: number,
+		limit: number
+	): { range: Range; top: number } | "clear" | null {
+		const book = this.bookEl;
+		const w = this.pageWidth();
+		if (!book || w <= 0) return null;
+		const origin = book.getBoundingClientRect();
+		const doc = el.ownerDocument;
+		const walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+		const texts: Text[] = [];
+		let total = 0;
+		for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+			const t = n as Text;
+			if (!t.length) continue;
+			texts.push(t);
+			total += t.length;
+		}
+		if (!total) return null;
+		const flat = texts.map((t) => t.data).join("");
+
+		const range = doc.createRange();
+		// The rect of the single character at a text-wide offset.
+		const charRect = (offset: number) => {
+			let rest = offset;
+			for (const t of texts) {
+				if (rest < t.length) {
+					range.setStart(t, rest);
+					range.setEnd(t, rest + 1);
+					break;
+				}
+				rest -= t.length;
+			}
+			const r = range.getBoundingClientRect();
+			return {
+				empty: r.width === 0 && r.height === 0,
+				page: Math.floor((r.left - origin.left + 1) / w),
+				top: r.top - origin.top,
+				bottom: r.bottom - origin.top,
+			};
+		};
+		// Has the text reached past the room the note needs by this character?
+		// A space collapsed away at a line wrap has no rect of its own; it
+		// reaches exactly as far as the first drawn character after it.
+		const past = (offset: number) => {
+			for (let i = offset; i < total; i++) {
+				const m = charRect(i);
+				if (m.empty) continue;
+				return m.page > page || (m.page === page && m.bottom > limit);
+			}
+			return false;
+		};
+		if (!past(total - 1)) return "clear"; // the text never reaches that far
+
+		let lo = 0;
+		let hi = total - 1;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (past(mid)) hi = mid;
+			else lo = mid + 1;
+		}
+		// The first drawn character at or after `lo` starts the first line
+		// that has to move.
+		let c = lo;
+		let m = charRect(c);
+		while (m.empty && c + 1 < total) m = charRect(++c);
+		// It may sit on the next page already, in which case nothing this
+		// block puts on this page is in the note's way.
+		if (m.page !== page) return "clear";
+		// Don't split a word: a line that starts mid-word (a hyphenation
+		// break) re-wraps once its tail is cut away, and the measured geometry
+		// no longer holds. Step back to the space in front of the word so the
+		// whole word moves. A word too long to be worth moving (40+ chars —
+		// likely a URL) is split at the wrap after all: cutting an unbreakable
+		// word at its own wrap point re-wraps nothing.
+		let at = c;
+		while (at > 0 && at > c - 40 && !/\s/.test(flat[at - 1])) at--;
+		if (at > 0 && !/\s/.test(flat[at - 1])) at = c;
+		if (at === 0) return null; // nothing would be left above the break
+		let rest = at;
+		for (const t of texts) {
+			if (rest <= t.length) {
+				range.setStart(t, rest);
+				range.setEnd(t, rest);
+				break;
+			}
+			rest -= t.length;
+		}
+		return { range: range.cloneRange(), top: m.top };
 	}
 
 	// Index of the first block on a page. Blocks are in document order and
@@ -894,6 +1040,24 @@ class Fb2View extends FileView {
 				hi = mid - 1;
 			} else {
 				lo = mid + 1;
+			}
+		}
+		return found;
+	}
+
+	// Index of the last block starting before a page — the block that a page
+	// no block starts on is the middle of. Same bisection as above.
+	private lastBlockBeforePage(blocks: HTMLElement[], page: number): number {
+		let lo = 0;
+		let hi = blocks.length - 1;
+		let found = -1;
+		while (lo <= hi) {
+			const mid = (lo + hi) >> 1;
+			if (this.pageOfElement(blocks[mid]) < page) {
+				found = mid;
+				lo = mid + 1;
+			} else {
+				hi = mid - 1;
 			}
 		}
 		return found;
