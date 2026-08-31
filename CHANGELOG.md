@@ -35,6 +35,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arrow keys / Page Up / Page Down or by clicking or tapping the left or
   right half of the page.
 
+### Fixed
+
+- **Page-foot note layout.** Reserving room for a note now breaks a long
+  paragraph at the exact line where the text must stop instead of pushing
+  the whole paragraph to the next page; the break never strands a lone
+  character above the rule, never splits a hyphenated word, and paragraphs
+  flowing in from the previous page are broken too (before, a note could
+  cover their text). Pages after a note no longer start with a band of
+  blank lines. Chapter headings are never broken mid-line — they move to
+  the next page whole.
+- **Phantom footnotes.** Markers inside the text of other notes no longer
+  produce spurious note blocks on unrelated pages.
+- **Popout windows.** Font, size, line height, theme and text color now
+  apply to readers in popout windows, not only in the main one.
+- **Returning to the beginning is remembered.** Going back to the first
+  page (or scrolling to the top) and closing the book now reopens it at the
+  beginning instead of the previous position.
+- **UTF-16 files without a BOM** are now decoded correctly instead of
+  turning into mojibake.
+- **Table of contents text** no longer includes the bare digits of footnote
+  markers that a chapter heading carries.
+
 ## [0.2.0] - 2026-07-21
 
 ### Added

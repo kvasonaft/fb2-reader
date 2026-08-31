@@ -188,6 +188,17 @@ function decodeFb2(buf: ArrayBuffer): string {
 	if (bom[0] === 0xfe && bom[1] === 0xff) {
 		return new TextDecoder("utf-16be").decode(buf);
 	}
+	// UTF-16 without a BOM: XML must start with "<" (0x3C), so the first
+	// 16-bit unit betrays the byte order. Without this check such a file
+	// would fall through every later step (the NUL bytes hide the encoding
+	// declaration from the latin1 sniff and break strict UTF-8) and come out
+	// as windows-1251 mojibake.
+	if (bom[0] === 0x3c && bom[1] === 0x00) {
+		return new TextDecoder("utf-16le").decode(buf);
+	}
+	if (bom[0] === 0x00 && bom[1] === 0x3c) {
+		return new TextDecoder("utf-16be").decode(buf);
+	}
 
 	const declared = declaredEncoding(buf);
 	if (declared && declared !== "utf-8") {
@@ -312,6 +323,11 @@ class Fb2View extends FileView {
 	private bookEl: HTMLElement | null = null;
 	private pageIndex = 0;
 	private pageCount = 1;
+	// While a book opens the reader sits at the start waiting for layout, and
+	// saving would clobber the real position with 0. Once the saved position
+	// has been applied, saving the start becomes legitimate — the reader may
+	// have gone back to the beginning on purpose, and that should stick.
+	private positionRestored = false;
 	private counterEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
 	// Footnotes: id → the <section> in <body name="notes"> holding its text,
@@ -417,6 +433,8 @@ class Fb2View extends FileView {
 		// frames; the reading position is restored when the queue drains.
 		this.collectBinaries(doc);
 		this.pageIndex = 0;
+		this.pageCount = 1;
+		this.positionRestored = false;
 		this.bookEl = container.createDiv({ cls: "fb2-book" });
 		this.applyModeClass();
 		this.renderBook(doc, this.bookEl);
@@ -442,6 +460,7 @@ class Fb2View extends FileView {
 		this.lastContentBlock = null;
 		this.pageIndex = 0;
 		this.pageCount = 1;
+		this.positionRestored = false;
 	}
 
 	// --- Reading position ---
@@ -475,7 +494,8 @@ class Fb2View extends FileView {
 			this.savePagedPosition(file);
 			return;
 		}
-		if (this.contentEl.scrollTop <= 0) return; // at the very beginning
+		// scrollTop 0 before the restore is just the book still loading.
+		if (this.contentEl.scrollTop <= 0 && !this.positionRestored) return;
 		this.plugin.setPosition(file.path, this.firstVisibleScrollIndex());
 	}
 
@@ -486,6 +506,7 @@ class Fb2View extends FileView {
 		// contentEl.win is the window owning this view — the correct one
 		// when the reader lives in a popout window.
 		this.contentEl.win.requestAnimationFrame(() => {
+			this.positionRestored = true; // saving the start is allowed from here
 			const blocks = this.getScrollBlocks();
 			if (this.isPaged()) {
 				const idx = pos ? Math.min(pos.index, blocks.length - 1) : 0;
@@ -652,9 +673,13 @@ class Fb2View extends FileView {
 
 	private noteRefs(): HTMLElement[] {
 		if (!this.bookEl) return [];
+		// Only markers in the book text proper. A note's own text can carry
+		// markers too — in the hidden notes body they have no geometry and
+		// pageOfElement puts them on a junk page; in an already placed
+		// page-foot block they would breed notes for notes on every pass.
 		return Array.from(
 			this.bookEl.querySelectorAll<HTMLElement>(".fb2-note-ref[data-fb2-note]")
-		);
+		).filter((r) => !r.closest(".fb2-notes, .fb2-page-notes"));
 	}
 
 	private clearFootnotes() {
@@ -1088,9 +1113,11 @@ class Fb2View extends FileView {
 	}
 
 	private savePagedPosition(file = this.file) {
-		if (!file || this.pageIndex <= 0) return; // at the start — nothing to save
+		if (!file) return;
+		// Page 0 before the restore is just the book still loading.
+		if (this.pageIndex <= 0 && !this.positionRestored) return;
 		const idx = this.currentBlockIndex();
-		if (idx > 0) this.plugin.setPosition(file.path, idx);
+		if (idx > 0 || this.positionRestored) this.plugin.setPosition(file.path, idx);
 	}
 
 	private updateCounter() {
@@ -1376,7 +1403,15 @@ class Fb2View extends FileView {
 					if (child.localName !== "p") continue;
 					if (heading.childNodes.length) heading.createEl("br");
 					this.renderInlineChildren(child, heading);
-					const text = child.textContent?.trim();
+					// TOC text, without the footnote markers a heading may
+					// carry — their bare numbers would read as part of it.
+					const clone = child.cloneNode(true) as Element;
+					for (const note of Array.from(
+						clone.querySelectorAll('a[type="note"]')
+					)) {
+						note.remove();
+					}
+					const text = clone.textContent?.trim();
 					if (text) tocText.push(text);
 				}
 				// Also add a TOC entry (except inside the footnotes body).
@@ -1651,6 +1686,17 @@ export default class Fb2ReaderPlugin extends Plugin {
 				if (leaf?.view instanceof Fb2View) this.updateToc(leaf.view);
 			})
 		);
+
+		// A popout window starts with a fresh <body> that has none of our CSS
+		// variables or theme classes; re-apply the settings when a window opens
+		// and when leaves move between windows. applySettings is idempotent
+		// and cheap, so firing it on every layout change costs nothing.
+		this.registerEvent(
+			this.app.workspace.on("window-open", () => this.applySettings())
+		);
+		this.registerEvent(
+			this.app.workspace.on("layout-change", () => this.applySettings())
+		);
 	}
 
 	// Called when the plugin is disabled: save data and remove every trace
@@ -1659,17 +1705,18 @@ export default class Fb2ReaderPlugin extends Plugin {
 		void this.saveData(this.data);
 		this.savePositionsDebounced.cancel();
 		this.savePositions();
-		const body = document.body;
-		body.style.removeProperty("--fb2-font-family");
-		body.style.removeProperty("--fb2-font-size");
-		body.style.removeProperty("--fb2-line-height");
-		body.style.removeProperty("--fb2-text-color");
-		body.removeClass(
-			"fb2-theme-dark",
-			"fb2-theme-light",
-			"fb2-theme-sepia",
-			"fb2-theme-solarized-dark"
-		);
+		for (const body of this.readerBodies()) {
+			body.style.removeProperty("--fb2-font-family");
+			body.style.removeProperty("--fb2-font-size");
+			body.style.removeProperty("--fb2-line-height");
+			body.style.removeProperty("--fb2-text-color");
+			body.removeClass(
+				"fb2-theme-dark",
+				"fb2-theme-light",
+				"fb2-theme-sepia",
+				"fb2-theme-solarized-dark"
+			);
+		}
 	}
 
 	// --- Settings ---
@@ -1680,10 +1727,23 @@ export default class Fb2ReaderPlugin extends Plugin {
 
 	// Applies the settings to the page by writing them into CSS variables
 	// on <body>; styles.css reads them and styles the book. This keeps the
-	// code and the styling decoupled.
+	// code and the styling decoupled. A reader may live in a popout window,
+	// whose document has its own <body> — write to every one of them.
 	applySettings() {
+		for (const body of this.readerBodies()) this.applySettingsTo(body);
+	}
+
+	// The <body> of the main window plus of every window holding a reader.
+	private readerBodies(): HTMLElement[] {
+		const bodies = new Set<HTMLElement>([document.body]);
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_FB2)) {
+			bodies.add(leaf.view.containerEl.doc.body);
+		}
+		return Array.from(bodies);
+	}
+
+	private applySettingsTo(body: HTMLElement) {
 		const s = this.data.settings;
-		const body = document.body;
 		if (s.fontFamily) body.style.setProperty("--fb2-font-family", s.fontFamily);
 		else body.style.removeProperty("--fb2-font-family");
 		body.style.setProperty("--fb2-font-size", `${s.fontSize}px`);
