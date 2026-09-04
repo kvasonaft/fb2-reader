@@ -81,6 +81,10 @@ interface Fb2Settings {
 // Reading positions are deliberately NOT here — see POSITIONS_KEY.
 interface Fb2Data {
 	settings: Fb2Settings;
+	// Whether the TOC panel has ever been added to the sidebar. It is put there
+	// once, for the first book ever opened; after that a panel the user closed
+	// stays closed, and the ribbon and the command bring it back.
+	tocPanelCreated?: boolean;
 }
 
 // Reading positions are kept in the vault's localStorage rather than in
@@ -318,11 +322,17 @@ class Fb2View extends FileView {
 	private collectToc = false; // whether TOC entries are being collected right now
 	private renderQueue: RenderJob[] = []; // blocks still waiting to be rendered
 	private renderPass = 0; // bumping this cancels an in-flight render
+	// Bumped whenever the view starts loading a file or lets one go. Reading a
+	// file is asynchronous, so a read belonging to a book the view has already
+	// moved on from has to be dropped when it finally lands.
+	private loadPass = 0;
 	// Paged mode: the columns layer, current/total pages, the "X of Y" overlay
 	// and a resize watcher.
 	private bookEl: HTMLElement | null = null;
 	private pageIndex = 0;
 	private pageCount = 1;
+	// Where currentBlockIndex landed last time, the starting point of its search.
+	private lastBlockIndex = 0;
 	// While a book opens the reader sits at the start waiting for layout, and
 	// saving would clobber the real position with 0. Once the saved position
 	// has been applied, saving the start becomes legitimate — the reader may
@@ -380,6 +390,15 @@ class Fb2View extends FileView {
 	}
 
 	onunload(): void {
+		// Backstops for a teardown that never reaches onUnloadFile: stop the work
+		// still in flight, flush a pending position save while the file is still
+		// known, and revoke the book's image URLs, which nothing else would free.
+		this.loadPass++;
+		this.renderPass++;
+		this.notesPass++;
+		this.relayoutNotesDebounced.cancel();
+		this.savePositionDebounced.run();
+		this.clearBinaries();
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		super.onunload();
@@ -405,6 +424,7 @@ class Fb2View extends FileView {
 	// The main entry point: Obsidian calls it when this view has to open
 	// a file. The whole pipeline happens here: bytes → text → XML → HTML.
 	async onLoadFile(file: TFile): Promise<void> {
+		const pass = ++this.loadPass;
 		const container = this.contentEl;
 		container.empty();
 		container.addClass("fb2-reader"); // CSS class the styles target
@@ -412,6 +432,10 @@ class Fb2View extends FileView {
 
 		// Step 1: read the file from the vault as bytes.
 		const buf = await this.app.vault.readBinary(file);
+		// The tab may have been closed, or sent to another book, while the file
+		// was being read. Everything below builds object URLs and DOM for a book
+		// nobody is looking at any more, and nothing would ever free them.
+		if (pass !== this.loadPass) return;
 
 		// Step 2: bytes → text (with encoding detection).
 		const xml = decodeFb2(buf);
@@ -434,6 +458,7 @@ class Fb2View extends FileView {
 		this.collectBinaries(doc);
 		this.pageIndex = 0;
 		this.pageCount = 1;
+		this.lastBlockIndex = 0;
 		this.positionRestored = false;
 		this.bookEl = container.createDiv({ cls: "fb2-book" });
 		this.applyModeClass();
@@ -444,6 +469,7 @@ class Fb2View extends FileView {
 	// Called when the file is closed: save the position and clean up
 	// so a large book is not kept in memory.
 	async onUnloadFile(file: TFile): Promise<void> {
+		this.loadPass++; // drop a file read that has not landed yet
 		this.renderPass++; // cancel a render that may still be in flight
 		this.notesPass++; // ...and a footnote layout, likewise
 		this.relayoutNotesDebounced.cancel();
@@ -460,6 +486,7 @@ class Fb2View extends FileView {
 		this.lastContentBlock = null;
 		this.pageIndex = 0;
 		this.pageCount = 1;
+		this.lastBlockIndex = 0;
 		this.positionRestored = false;
 	}
 
@@ -510,6 +537,7 @@ class Fb2View extends FileView {
 			const blocks = this.getScrollBlocks();
 			if (this.isPaged()) {
 				const idx = pos ? Math.min(pos.index, blocks.length - 1) : 0;
+				this.lastBlockIndex = Math.max(0, idx); // where to search from next
 				const target = blocks[Math.max(0, idx)];
 				// A position saved inside the notes body (only reachable in
 				// scroll mode, where that body is visible) has no page of its
@@ -711,13 +739,24 @@ class Fb2View extends FileView {
 			onDone?.();
 			return;
 		}
-		this.pumpFootnotes(pass, 0, anchor, 0, onDone);
+		// Neither list changes while the layout runs — a spacer and a note block
+		// match neither selector — so they are built once here rather than being
+		// re-queried, with a closest() per block, on every frame slice.
+		this.pumpFootnotes(
+			pass,
+			{ refs: this.noteRefs(), blocks: this.contentBlocks() },
+			0,
+			anchor,
+			0,
+			onDone
+		);
 	}
 
 	// Walks the markers in document order, one page per step, in ~12 ms slices
 	// so a book with hundreds of notes never freezes the UI.
 	private pumpFootnotes(
 		pass: number,
+		lists: { refs: HTMLElement[]; blocks: HTMLElement[] },
 		from: number,
 		anchor: number,
 		retries: number,
@@ -725,8 +764,7 @@ class Fb2View extends FileView {
 	) {
 		if (pass !== this.notesPass || !this.bookEl) return;
 		const deadline = performance.now() + 12;
-		const refs = this.noteRefs();
-		const blocks = this.contentBlocks();
+		const { refs, blocks } = lists;
 		let i = from;
 		let retried = retries;
 		while (i < refs.length) {
@@ -742,7 +780,7 @@ class Fb2View extends FileView {
 				const at = i;
 				const left = retried;
 				win.requestAnimationFrame(() =>
-					this.pumpFootnotes(pass, at, anchor, left, onDone)
+					this.pumpFootnotes(pass, lists, at, anchor, left, onDone)
 				);
 				return;
 			}
@@ -1098,18 +1136,46 @@ class Fb2View extends FileView {
 
 	// The first content block currently visible in the viewport. Uses actual
 	// on-screen geometry (not page math), so it stays correct even mid-reflow.
+	//
+	// Every page turn and every frame of a resize asks for this, so it starts
+	// from the answer it gave last time and searches outward. Reading moves by
+	// one page, so the block is a few steps away; measuring the whole book from
+	// the start instead made the cost grow with how far into the book the reader
+	// had got. The walk back at the end is what keeps the answer the FIRST
+	// visible block: the visible ones are contiguous, so stepping back while the
+	// block before is still visible lands on the same one a scan from zero would.
 	private currentBlockIndex(): number {
 		const rect = this.contentEl.getBoundingClientRect();
 		const blocks = this.getScrollBlocks();
-		const idx = blocks.findIndex((b) => {
-			const r = b.getBoundingClientRect();
+		if (!blocks.length) return 0;
+		const visible = (i: number) => {
+			const r = blocks[i].getBoundingClientRect();
 			return (
 				r.right > rect.left + 1 &&
 				r.left < rect.right - 1 &&
 				r.bottom > rect.top + 1
 			);
-		});
-		return idx >= 0 ? idx : 0;
+		};
+		const start = Math.min(Math.max(this.lastBlockIndex, 0), blocks.length - 1);
+		let hit = -1;
+		for (let step = 0; step < blocks.length; step++) {
+			const back = start - step;
+			const fwd = start + step;
+			if (back < 0 && fwd >= blocks.length) break;
+			if (back >= 0 && visible(back)) {
+				hit = back;
+				break;
+			}
+			// fwd === back on the first step; don't measure the same block twice.
+			if (fwd !== back && fwd < blocks.length && visible(fwd)) {
+				hit = fwd;
+				break;
+			}
+		}
+		if (hit < 0) return 0; // nothing on screen (mid-reflow, or an empty book)
+		while (hit > 0 && visible(hit - 1)) hit--;
+		this.lastBlockIndex = hit;
+		return hit;
 	}
 
 	private savePagedPosition(file = this.file) {
@@ -1126,8 +1192,31 @@ class Fb2View extends FileView {
 
 	// Reveal an element (TOC entry or cross-reference target) in either mode.
 	revealElement(el: HTMLElement) {
-		if (this.isPaged()) this.goToPage(this.pageOfElement(el), true);
-		else el.scrollIntoView({ behavior: "smooth", block: "start" });
+		if (!this.isPaged()) {
+			el.scrollIntoView({ behavior: "smooth", block: "start" });
+			return;
+		}
+		const target = this.pagedTarget(el);
+		if (target) this.goToPage(this.pageOfElement(target), true);
+	}
+
+	// Where to land for a target in paged mode. Paged mode hides the
+	// end-of-book notes body, and a hidden element has no geometry, so
+	// pageOfElement would answer with a junk page for anything inside it. A link
+	// into a note is redirected to the marker referring to it, which sits on the
+	// page the note is printed under; a note nothing refers to has nowhere to go.
+	private pagedTarget(el: HTMLElement): HTMLElement | null {
+		if (!el.closest(".fb2-notes")) return el;
+		const id = el.closest("[data-fb2-id]")?.getAttribute("data-fb2-id");
+		if (!id || !this.bookEl) return null;
+		const refs = this.bookEl.querySelectorAll<HTMLElement>(
+			`.fb2-note-ref[data-fb2-note="${CSS.escape(id)}"]`
+		);
+		return (
+			Array.from(refs).find(
+				(r) => !r.closest(".fb2-notes, .fb2-page-notes")
+			) ?? null
+		);
 	}
 
 	// Called by the plugin after any settings change: switch layout if the
@@ -1607,18 +1696,28 @@ class Fb2TocView extends ItemView {
 		// Book title on top, then one row per heading.
 		el.createDiv({ cls: "fb2-toc-book", text: this.source.getDisplayText() });
 		for (const item of this.source.tocItems) {
+			// The row is a button in everything but tag name, so it says so and
+			// takes focus: a bare div with a click handler cannot be reached by
+			// keyboard and is announced as nothing at all.
 			const row = el.createDiv({
 				cls: "fb2-toc-item",
 				text: item.text || "(untitled)",
+				attr: { role: "button", tabindex: "0" },
 			});
 			// Indentation grows with depth to show chapter nesting.
 			row.setCssStyles({ paddingLeft: `${(item.depth - 1) * 14 + 6}px` });
-			// Click: reveal the book tab and scroll to the chapter.
-			row.addEventListener("click", () => {
+			// Reveal the book tab and scroll to the chapter.
+			const open = () => {
 				const src = this.source;
 				if (!src) return;
 				void this.app.workspace.revealLeaf(src.leaf);
 				src.revealElement(item.el);
+			};
+			row.addEventListener("click", open);
+			row.addEventListener("keydown", (e) => {
+				if (e.key !== "Enter" && e.key !== " ") return;
+				e.preventDefault(); // Space would scroll the panel
+				open();
 			});
 		}
 	}
@@ -1649,6 +1748,7 @@ export default class Fb2ReaderPlugin extends Plugin {
 		const stored = ((await this.loadData()) ?? {}) as LegacyFb2Data;
 		this.data = {
 			settings: Object.assign({}, DEFAULT_SETTINGS, stored.settings),
+			tocPanelCreated: stored.tocPanelCreated === true,
 		};
 		this.loadPositions(stored);
 		this.applySettings();
@@ -1697,11 +1797,22 @@ export default class Fb2ReaderPlugin extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => this.applySettings())
 		);
+
+		// Positions are keyed by file path, so a renamed or moved book has to take
+		// its entry along or it reopens at page one.
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) =>
+				this.movePositions(file.path, oldPath)
+			)
+		);
 	}
 
 	// Called when the plugin is disabled: save data and remove every trace
 	// of our settings from <body> (CSS variables and theme classes).
 	onunload() {
+		// Cancel before saving by hand: a debounced write landing after the plugin
+		// is gone would overwrite what we are about to put on disk.
+		this.saveDataDebounced.cancel();
 		void this.saveData(this.data);
 		this.savePositionsDebounced.cancel();
 		this.savePositions();
@@ -1784,6 +1895,29 @@ export default class Fb2ReaderPlugin extends Plugin {
 		this.savePositionsDebounced();
 	}
 
+	// Follows a rename: moves the entry of the file itself, and — since a folder
+	// rename is reported as one event for the folder — the entries of every book
+	// underneath it, which are matched by path prefix.
+	private movePositions(path: string, oldPath: string) {
+		const prefix = `${oldPath}/`;
+		const moved: Record<string, ReadingPosition> = {};
+		let changed = false;
+		for (const [key, pos] of Object.entries(this.positions)) {
+			if (key === oldPath) {
+				moved[path] = pos;
+				changed = true;
+			} else if (key.startsWith(prefix)) {
+				moved[path + key.slice(oldPath.length)] = pos;
+				changed = true;
+			} else {
+				moved[key] = pos;
+			}
+		}
+		if (!changed) return;
+		this.positions = moved;
+		this.savePositionsDebounced();
+	}
+
 	// Reads the positions saved on this device. Versions up to 0.2.0 kept them
 	// in data.json; if such entries are still there they are moved over once
 	// and stripped from the file, so an update does not lose reading progress.
@@ -1815,16 +1949,28 @@ export default class Fb2ReaderPlugin extends Plugin {
 
 	// --- TOC panel ---
 
-	// Called by the reader when it has opened a book: create the TOC panel
-	// in the right sidebar if it does not exist yet, then refresh it.
+	// Called by the reader when it has opened a book: put the TOC panel in the
+	// right sidebar the first time round, then refresh it.
 	onFb2Opened(view: Fb2View) {
 		this.app.workspace.onLayoutReady(async () => {
-			if (!this.app.workspace.getLeavesOfType(VIEW_TYPE_TOC).length) {
-				const leaf = this.app.workspace.getRightLeaf(false);
-				await leaf?.setViewState({ type: VIEW_TYPE_TOC, active: false });
-			}
+			await this.ensureTocPanelOnce();
 			this.updateToc(view);
 		});
+	}
+
+	// Adds the TOC panel to the right sidebar the first time a book is opened,
+	// and never again. Reopening it on every book undid the user's decision to
+	// close it; the ribbon and the "Open table of contents" command are the way
+	// back, and an existing panel is simply noted as done.
+	private async ensureTocPanelOnce() {
+		if (this.data.tocPanelCreated) return;
+		if (!this.app.workspace.getLeavesOfType(VIEW_TYPE_TOC).length) {
+			const leaf = this.app.workspace.getRightLeaf(false);
+			if (!leaf) return; // no sidebar to put it in; try again next time
+			await leaf.setViewState({ type: VIEW_TYPE_TOC, active: false });
+		}
+		this.data.tocPanelCreated = true;
+		this.saveDataDebounced();
 	}
 
 	// Shows the given reader's TOC in every TOC panel.

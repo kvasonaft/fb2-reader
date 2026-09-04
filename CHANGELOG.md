@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are lost if Obsidian is reinstalled. Plugin settings are unaffected and
   stay in `data.json`.
 - The minimum required Obsidian version is now **1.8.7**.
+- **The table-of-contents panel no longer reopens itself.** It is added to
+  the right sidebar once, the first time a book is opened; after that, a
+  panel you close stays closed. Bring it back with the ribbon button or the
+  "Open table of contents" command.
+- **Reading positions follow a renamed book.** Renaming or moving a file, or
+  the folder it sits in, used to send it back to page one.
+- **Table-of-contents entries are reachable from the keyboard.** They take
+  focus and open with Enter or Space, and screen readers announce them as
+  buttons.
 
 ### Removed
 
@@ -56,6 +65,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turning into mojibake.
 - **Table of contents text** no longer includes the bare digits of footnote
   markers that a chapter heading carries.
+- **Closing a book while it loads.** Closing the tab before a large file had
+  finished loading left the book's images in memory for the rest of the
+  session and drew it into the closed tab. The load is now abandoned.
+- **Links into the notes section in paged mode.** A cross-reference pointing
+  at a footnote jumped to an arbitrary page, because paged mode hides the
+  notes section at the end of the book. It now goes to the page carrying
+  that note's marker, where the note is printed.
+- **Turning pages deep into a book** no longer gets slower the further you
+  read, and resizing the window is smoother for the same reason.
 
 ## [0.2.0] - 2026-07-21
 

@@ -337,6 +337,12 @@ body.fb2-theme-solarized-dark .fb2-reader a {
 	background: var(--background-modifier-hover);
 }
 
+/* The rows are focusable buttons, so keyboard focus has to be visible. */
+.fb2-toc-item:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: -2px;
+}
+
 .fb2-toc-empty {
 	color: var(--text-muted);
 	padding: 0 6px;
