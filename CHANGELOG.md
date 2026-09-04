@@ -5,6 +5,20 @@ All notable changes to the FB2 Reader plugin are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Rotating a tablet no longer flickers its way to the new page.** The book
+  was laid out while the size was still changing, and then again, page by page
+  across dozens of frames, as the page-foot footnotes took their room back —
+  all of it in full view, so the text jumped around for a second before
+  settling in the right place. The layout now happens once, after the size
+  stops changing, under a cover that lifts on the finished page. Changing the
+  font or the line spacing is handled the same way.
+- **Rotating while a book is still opening** no longer loses the saved reading
+  position and leaves you at the front of the book.
+
 ## [0.3.0] - 2026-09-04
 
 ### Added

@@ -351,17 +351,16 @@ class Fb2View extends FileView {
 	private noteSources = new Map<string, Element>();
 	private notesPass = 0;
 	// Last block of the book proper (the notes body excluded), cached because
-	// recomputePagination needs it on every resize frame.
+	// recomputePagination measures against it every time it runs.
 	private lastContentBlock: HTMLElement | null = null;
-	// Re-laying out the footnotes means reflowing the whole book once per page
-	// carrying a note, so it is deferred until resizing settles; recomputing the
-	// pagination is a single reflow and runs on each distinct size.
-	private relayoutNotesDebounced = debounce(() => this.layoutFootnotes(), 250);
-	// Ends a resize burst once the size has been still for a moment. Longer than
-	// the footnote debounce above, so that relayout still sees the held anchor.
-	private releaseResizeAnchor = debounce(() => {
-		this.resizeAnchor = -1;
-	}, 400);
+	// Set while a book is opening and its saved position has not been applied
+	// yet. A reflow starting in the middle cancels the opening footnote layout,
+	// and would drop the restore with it; it is picked up here instead.
+	private pendingRestore: (() => void) | null = null;
+	// Lays the book out for its new size, once the size has stopped changing.
+	private settleResizeDebounced = debounce(() => this.settleResize(), 150);
+	// True while the reader is covered for a reflow; see beginReflow.
+	private reflowing = false;
 	// Scroll fires dozens of times per second; saving once, 800 ms after
 	// scrolling settles, is enough.
 	private savePositionDebounced = debounce(
@@ -393,24 +392,24 @@ class Fb2View extends FileView {
 		// Re-paginate when the reader area changes size (window resize, sidebar
 		// toggle, popout, tablet rotation). Cheap no-op in scroll mode.
 		this.resizeObserver = new ResizeObserver(() => {
-			if (!this.isPaged()) return;
+			// observe() fires once on its own, before any book is open.
+			if (!this.isPaged() || !this.bookEl) return;
 			const w = this.contentEl.clientWidth;
 			const h = this.contentEl.clientHeight;
 			// Rotating a tablet takes the reader through sizes that mean nothing,
-			// a zero among them. Reflowing the whole book for one is wasted work
-			// and its measurements are not to be believed.
+			// a zero among them, and lastWidth/lastHeight hold the size the book
+			// was actually laid out for, so a size it already fits is ignored.
 			if (w <= 0 || h <= 0) return;
 			if (w === this.lastWidth && h === this.lastHeight) return;
-			this.lastWidth = w;
-			this.lastHeight = h;
-			// A rotation fires this several times over the course of its animation.
-			// The anchor is taken once, from the settled layout the burst started
-			// from, and held: deriving a fresh one from each half-changed layout in
-			// between is what carried the reader pages away from where they were.
+			// Nothing is laid out here. A rotation fires this several times as the
+			// window animates, and every layout was landing on screen: each event
+			// reflowed the whole book, and the footnote pass then reflowed it again
+			// page by page over dozens of frames, all of it in front of the reader.
+			// Instead the page the reader was on is remembered, the reader is
+			// covered, and it is all laid out once the size stops changing.
 			if (this.resizeAnchor < 0) this.resizeAnchor = this.pageAnchor;
-			this.releaseResizeAnchor();
-			this.recomputePagination(this.resizeAnchor);
-			this.relayoutNotesDebounced();
+			this.beginReflow();
+			this.settleResizeDebounced();
 		});
 		this.resizeObserver.observe(this.contentEl);
 	}
@@ -422,8 +421,8 @@ class Fb2View extends FileView {
 		this.loadPass++;
 		this.renderPass++;
 		this.notesPass++;
-		this.relayoutNotesDebounced.cancel();
-		this.releaseResizeAnchor.cancel();
+		this.settleResizeDebounced.cancel();
+		this.endReflow();
 		this.savePositionDebounced.run();
 		this.clearBinaries();
 		this.resizeObserver?.disconnect();
@@ -454,6 +453,7 @@ class Fb2View extends FileView {
 		const pass = ++this.loadPass;
 		const container = this.contentEl;
 		container.empty();
+		this.endReflow(); // a cover must not carry over into the next book
 		container.addClass("fb2-reader"); // CSS class the styles target
 		this.tocItems = [];
 
@@ -483,6 +483,7 @@ class Fb2View extends FileView {
 		// plugin (so it opens the TOC panel). Rendering is sliced across
 		// frames; the reading position is restored when the queue drains.
 		this.collectBinaries(doc);
+		this.pendingRestore = null;
 		this.pageIndex = 0;
 		this.pageCount = 1;
 		this.pageAnchor = 0;
@@ -502,9 +503,10 @@ class Fb2View extends FileView {
 		this.loadPass++; // drop a file read that has not landed yet
 		this.renderPass++; // cancel a render that may still be in flight
 		this.notesPass++; // ...and a footnote layout, likewise
-		this.relayoutNotesDebounced.cancel();
-		this.releaseResizeAnchor.cancel();
+		this.settleResizeDebounced.cancel();
+		this.endReflow();
 		this.renderQueue = [];
+		this.pendingRestore = null;
 		this.noteSources.clear();
 		this.saveReadingPosition(file);
 		this.plugin.clearTocFor(this);
@@ -622,6 +624,40 @@ class Fb2View extends FileView {
 		return Math.max(0, Math.floor((elLeft - bookLeft + 1) / w));
 	}
 
+	// Covers the reader for the duration of a reflow. Rebuilding the columns and
+	// giving the footnotes their room back moves the text dozens of times over,
+	// across as many frames, and every one of those was landing on screen. The
+	// cover is painted over the book rather than hiding it, because the layout
+	// underneath is measured throughout and must not be disturbed.
+	private beginReflow() {
+		if (this.reflowing) return;
+		this.reflowing = true;
+		this.contentEl.addClass("fb2-reflowing");
+	}
+
+	private endReflow() {
+		if (!this.reflowing) return;
+		this.reflowing = false;
+		this.contentEl.removeClass("fb2-reflowing");
+	}
+
+	// Lays the book out for the size it now has. Deferred from the resize
+	// observer, so it runs once per burst however many events the burst had.
+	private settleResize() {
+		const anchor = this.resizeAnchor;
+		this.resizeAnchor = -1;
+		if (!this.isPaged() || !this.bookEl) {
+			this.endReflow();
+			return;
+		}
+		this.lastWidth = this.contentEl.clientWidth;
+		this.lastHeight = this.contentEl.clientHeight;
+		// recomputePagination leaves pageAnchor pointing at the block the new
+		// current page opens with, which is what layoutFootnotes then holds on to.
+		this.recomputePagination(anchor);
+		this.layoutFootnotes(); // uncovers the reader when it is done
+	}
+
 	// Toggle the paged/scroll CSS class and create or drop the page counter.
 	private applyModeClass() {
 		const paged = this.isPaged();
@@ -636,7 +672,8 @@ class Fb2View extends FileView {
 			// Scroll mode has no pages to sit at the foot of; the notes body at
 			// the end of the book becomes visible again instead.
 			this.notesPass++; // cancel a footnote layout still in flight
-			this.relayoutNotesDebounced.cancel();
+			this.settleResizeDebounced.cancel();
+			this.endReflow();
 			this.clearFootnotes();
 			// Drop the inline paged styles so scroll mode lays out normally.
 			this.bookEl?.setCssStyles({
@@ -767,15 +804,23 @@ class Fb2View extends FileView {
 	// with it, the caller decides where to land instead.
 	private layoutFootnotes(onDone?: () => void) {
 		const book = this.bookEl;
-		if (!book) return;
+		if (!book) {
+			this.endReflow();
+			return;
+		}
 		const pass = ++this.notesPass; // cancels a layout still in flight
 		// Keep the reader on the block its page opens with: reserving room shifts
-		// every later page along. During a resize burst that is the anchor the
-		// burst started from, since this runs debounced in the middle of one.
-		const anchor = this.resizeAnchor >= 0 ? this.resizeAnchor : this.pageAnchor;
+		// every later page along.
+		const anchor = this.pageAnchor;
+		// A book still opening has its saved position waiting on the end of this
+		// layout. Bumping the pass above just cancelled that layout, so whatever
+		// cancelled it inherits the restore rather than leaving the reader at the
+		// front of the book.
+		const done = onDone ?? this.pendingRestore ?? undefined;
 		this.clearFootnotes();
 		if (!this.isPaged() || !this.noteSources.size) {
-			onDone?.();
+			done?.();
+			this.endReflow();
 			return;
 		}
 		// Neither list changes while the layout runs — a spacer and a note block
@@ -787,7 +832,7 @@ class Fb2View extends FileView {
 			0,
 			anchor,
 			0,
-			onDone
+			done
 		);
 	}
 
@@ -824,13 +869,16 @@ class Fb2View extends FileView {
 				return;
 			}
 		}
-		// The spacers changed the page count; recompute it and return the
-		// reader to where it was.
+		// The spacers changed the page count; recompute it and return the reader
+		// to where it was, and only then uncover it.
 		this.recomputePagination(-1);
-		if (onDone) {
-			onDone();
-			return;
-		}
+		if (onDone) onDone();
+		else this.goToAnchor(anchor);
+		this.endReflow();
+	}
+
+	// Put the reader back on the block a reflow was anchored to.
+	private goToAnchor(anchor: number) {
 		const el = this.getScrollBlocks()[anchor];
 		if (el) this.goToPage(this.pageOfElement(el), false);
 	}
@@ -1262,6 +1310,8 @@ class Fb2View extends FileView {
 			const blocks = this.getScrollBlocks();
 			const el = blocks[Math.min(anchor, blocks.length - 1)];
 			if (this.isPaged()) {
+				// Same churn as a resize, and hidden for the same reason.
+				this.beginReflow();
 				this.recomputePagination(-1);
 				this.goToPage(el ? this.pageOfElement(el) : 0, false);
 				// Font or spacing changes move every marker, so the page-foot
@@ -1418,12 +1468,14 @@ class Fb2View extends FileView {
 		this.lastContentBlock = blocks[blocks.length - 1] ?? null;
 		this.plugin.updateToc(this);
 		const restore = () => {
+			this.pendingRestore = null;
 			if (this.file) this.restoreReadingPosition(this.file.path);
 		};
 		if (!this.isPaged()) {
 			restore();
 			return;
 		}
+		this.pendingRestore = restore;
 		this.recomputePagination(-1);
 		// The saved position is restored only once the notes have taken their
 		// room: they shift every page after them along.

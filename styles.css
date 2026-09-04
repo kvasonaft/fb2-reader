@@ -119,6 +119,23 @@ body.fb2-theme-solarized-dark .fb2-reader a {
 	max-height: 100%;
 }
 
+/* An opaque cover over the reader while the book is laid out for a new size.
+   Rebuilding the columns and giving the footnotes their room back moves the
+   text dozens of times over, across as many frames, and a rotation used to
+   flicker its way to the right page in full view. A cover rather than hiding
+   the book itself: the layout underneath is measured all the way through and
+   has to stay exactly what it would otherwise be. */
+.fb2-reader.fb2-paged.fb2-reflowing::after {
+	content: "";
+	position: absolute;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	left: 0;
+	background: var(--background-primary);
+	z-index: 5;
+}
+
 /* "Page X of Y" indicator, centered in the bottom margin. */
 .fb2-page-counter {
 	position: absolute;
