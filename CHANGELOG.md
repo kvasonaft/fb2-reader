@@ -74,6 +74,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that note's marker, where the note is printed.
 - **Turning pages deep into a book** no longer gets slower the further you
   read, and resizing the window is smoother for the same reason.
+- **Rotating a tablet, or resizing the window, no longer jumps several pages.**
+  In paged mode the reflow used to hold on to the first block *visible* on the
+  page. A page normally opens in the middle of a paragraph carried over from
+  the page before, and that paragraph belongs to the previous page, so every
+  reflow stepped one page back — and an orientation change reflows several
+  times over. The reflow now holds on to the block the page opens with, and
+  holds the same one for the whole rotation. Sizes reported mid-rotation,
+  including the empty ones iPadOS goes through, are ignored rather than
+  collapsing the page count and throwing the reader to the front of the book.
+- **Reopening a book in paged mode** lands on the page you left, instead of
+  the one before it, for the same reason.
 
 ## [0.2.0] - 2026-07-21
 
