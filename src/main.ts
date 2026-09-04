@@ -652,10 +652,18 @@ class Fb2View extends FileView {
 		}
 		this.lastWidth = this.contentEl.clientWidth;
 		this.lastHeight = this.contentEl.clientHeight;
-		// recomputePagination leaves pageAnchor pointing at the block the new
-		// current page opens with, which is what layoutFootnotes then holds on to.
+		// Take the old spacers out before measuring anything. They were cut for
+		// the old page height, and pagination measured against them lands the
+		// reader on a page that only ever existed halfway through the change.
+		this.notesPass++; // stop a layout still placing the old notes
+		this.clearFootnotes();
 		this.recomputePagination(anchor);
-		this.layoutFootnotes(); // uncovers the reader when it is done
+		// The reader has their page back here, and everything below is filled in
+		// behind them. Laying the notes out again reflows the whole book once per
+		// page that carries one, which on a long book is seconds of work; holding
+		// a blank screen for that is far worse than the churn it was hiding.
+		this.endReflow();
+		this.layoutFootnotes();
 	}
 
 	// Toggle the paged/scroll CSS class and create or drop the page counter.
@@ -799,9 +807,9 @@ class Fb2View extends FileView {
 		}
 	}
 
-	// Rebuilds every page-foot note block from scratch. Without `onDone` the
-	// reader is left on the block it was showing when the layout started;
-	// with it, the caller decides where to land instead.
+	// Rebuilds every page-foot note block from scratch, in frame-sized slices,
+	// keeping the reader on the block their page opens with as it goes. Without
+	// `onDone` that is where they are left; with it, the caller decides.
 	private layoutFootnotes(onDone?: () => void) {
 		const book = this.bookEl;
 		if (!book) {
@@ -809,9 +817,6 @@ class Fb2View extends FileView {
 			return;
 		}
 		const pass = ++this.notesPass; // cancels a layout still in flight
-		// Keep the reader on the block its page opens with: reserving room shifts
-		// every later page along.
-		const anchor = this.pageAnchor;
 		// A book still opening has its saved position waiting on the end of this
 		// layout. Bumping the pass above just cancelled that layout, so whatever
 		// cancelled it inherits the restore rather than leaving the reader at the
@@ -830,7 +835,6 @@ class Fb2View extends FileView {
 			pass,
 			{ refs: this.noteRefs(), blocks: this.contentBlocks() },
 			0,
-			anchor,
 			0,
 			done
 		);
@@ -842,7 +846,6 @@ class Fb2View extends FileView {
 		pass: number,
 		lists: { refs: HTMLElement[]; blocks: HTMLElement[] },
 		from: number,
-		anchor: number,
 		retries: number,
 		onDone?: () => void
 	) {
@@ -860,20 +863,27 @@ class Fb2View extends FileView {
 			retried = next === i ? retried + 1 : 0;
 			i = next;
 			if (performance.now() > deadline) {
+				// This runs with the reader watching, so it has to follow them.
+				// Spacers going in on earlier pages push the block their page opens
+				// with onto later pages, and the text would slide out from under
+				// them while the rest of the book is laid out. pageAnchor is that
+				// block and goToAnchor refreshes it, so a page turn in the middle of
+				// all this is picked up rather than fought.
+				this.goToAnchor(this.pageAnchor);
 				const win = this.contentEl.win;
 				const at = i;
 				const left = retried;
 				win.requestAnimationFrame(() =>
-					this.pumpFootnotes(pass, lists, at, anchor, left, onDone)
+					this.pumpFootnotes(pass, lists, at, left, onDone)
 				);
 				return;
 			}
 		}
-		// The spacers changed the page count; recompute it and return the reader
-		// to where it was, and only then uncover it.
+		// The spacers changed the page count; recompute it and settle the reader
+		// on the page their block ended up on.
 		this.recomputePagination(-1);
 		if (onDone) onDone();
-		else this.goToAnchor(anchor);
+		else this.goToAnchor(this.pageAnchor);
 		this.endReflow();
 	}
 
@@ -1310,10 +1320,14 @@ class Fb2View extends FileView {
 			const blocks = this.getScrollBlocks();
 			const el = blocks[Math.min(anchor, blocks.length - 1)];
 			if (this.isPaged()) {
-				// Same churn as a resize, and hidden for the same reason.
+				// Same as a resize: cover the one reflow that repositions the
+				// reader, then fill the notes back in behind them.
 				this.beginReflow();
+				this.notesPass++;
+				this.clearFootnotes();
 				this.recomputePagination(-1);
 				this.goToPage(el ? this.pageOfElement(el) : 0, false);
+				this.endReflow();
 				// Font or spacing changes move every marker, so the page-foot
 				// notes have to be laid out again from scratch.
 				this.layoutFootnotes();

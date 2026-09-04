@@ -5,6 +5,22 @@ All notable changes to the FB2 Reader plugin are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Rotating a tablet no longer blanks the screen.** 0.3.1 covered the reader
+  for the whole layout, and on a long book with many footnotes that is seconds
+  of work, so the cover turned a second of flicker into ten seconds of nothing.
+  The cover now lasts only the one quick step that puts the reader back on
+  their page. The footnotes are then filled in behind them, page by page, with
+  the reader held on the paragraph they were reading, so the text no longer
+  slides away while the rest of the book is laid out.
+- **The page landed on after a rotation.** The new pagination was measured
+  while the old page-foot notes were still in place, cut for the old page
+  height, so the reader was put on a page that only ever existed halfway
+  through the change. The notes are cleared before anything is measured.
+
 ## [0.3.1] - 2026-09-04
 
 ### Fixed
