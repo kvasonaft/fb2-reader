@@ -356,13 +356,9 @@ class Fb2View extends FileView {
 	private positionRestored = false;
 	private counterEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
-	// Footnotes: id → the <section> in <body name="notes"> holding its text,
-	// plus a pass counter that cancels a footnote layout still in flight.
-	private noteSources = new Map<string, Element>();
-	private notesPass = 0;
-	// Last block of the book proper (the notes body excluded), cached because
-	// recomputePagination measures against it every time it runs.
-	private lastContentBlock: HTMLElement | null = null;
+	// Last block of the book, cached because recomputePagination measures
+	// against it every time it runs.
+	private lastBlock: HTMLElement | null = null;
 	// Lays the book out for its new size, once the size has stopped changing.
 	private settleResizeDebounced = debounce(() => this.settleResize(), 150);
 	// True while the reader is covered for a reflow; see beginReflow.
@@ -410,18 +406,14 @@ class Fb2View extends FileView {
 			// for, so a size it already fits is ignored.
 			if (w === this.lastWidth && h === this.lastHeight) return;
 			// Nothing is laid out here. A rotation fires this several times as the
-			// window animates, and every layout was landing on screen: each event
-			// reflowed the whole book, and the footnote pass then reflowed it again
-			// page by page over dozens of frames, all of it in front of the reader.
-			// Instead the reader is covered and the book is laid out once the size
-			// stops changing, anchored on the block they are on (pageAnchor). A
-			// footnote layout still in flight is stopped: it would be measuring a
-			// viewport that means nothing. Rotating a tablet takes the reader
-			// through a zero size too; that starts a burst like any other, and
-			// settleResize leaves the book alone until it has an area again.
+			// window animates, and every layout was landing on screen, so the text
+			// jumped around in front of the reader. Instead the reader is covered
+			// and the book is laid out once the size stops changing, anchored on
+			// the block they are on (pageAnchor). Rotating a tablet takes the
+			// reader through a zero size too; that starts a burst like any other,
+			// and settleResize leaves the book alone until it has an area again.
 			if (!this.resizing) {
 				this.resizing = true;
-				this.notesPass++;
 				this.beginReflow();
 			}
 			this.settleResizeDebounced();
@@ -435,7 +427,6 @@ class Fb2View extends FileView {
 		// known, and revoke the book's image URLs, which nothing else would free.
 		this.loadPass++;
 		this.renderPass++;
-		this.notesPass++;
 		this.settleResizeDebounced.cancel();
 		this.endReflow();
 		this.savePositionDebounced.run();
@@ -518,11 +509,9 @@ class Fb2View extends FileView {
 	async onUnloadFile(file: TFile): Promise<void> {
 		this.loadPass++; // drop a file read that has not landed yet
 		this.renderPass++; // cancel a render that may still be in flight
-		this.notesPass++; // ...and a footnote layout, likewise
 		this.settleResizeDebounced.cancel();
 		this.endReflow();
 		this.renderQueue = [];
-		this.noteSources.clear();
 		this.saveReadingPosition(file);
 		this.plugin.clearTocFor(this);
 		this.clearBinaries();
@@ -531,7 +520,7 @@ class Fb2View extends FileView {
 		this.contentEl.empty();
 		this.bookEl = null;
 		this.counterEl = null;
-		this.lastContentBlock = null;
+		this.lastBlock = null;
 		this.pageIndex = 0;
 		this.pageCount = 1;
 		this.pageAnchor = 0;
@@ -605,20 +594,13 @@ class Fb2View extends FileView {
 		});
 	}
 
-	// Maps a block index — a saved position, or the first block in view when
-	// the mode flips — onto a block the paged layout can put on a page: clamped
-	// to the book, and moved to the end of the book proper when it points into
-	// the notes body. A position inside that body is only ever saved in scroll
-	// mode, where the body is visible; paged mode prints those notes under
-	// their own pages and hides the body, so it has no page of its own.
+	// Clamps a block index — a saved position, or the first block in view when
+	// the mode flips — to the book, which may have changed since it was saved.
 	// Answers -1 for a book with no blocks at all.
 	private resolveAnchor(index: number): number {
-		const blocks = this.getScrollBlocks();
-		if (!blocks.length) return -1;
-		const idx = Math.max(0, Math.min(index, blocks.length - 1));
-		if (!blocks[idx].closest(".fb2-notes")) return idx;
-		const last = this.lastContentBlock;
-		return last ? Math.max(0, blocks.indexOf(last)) : 0;
+		const count = this.getScrollBlocks().length;
+		if (!count) return -1;
+		return Math.max(0, Math.min(index, count - 1));
 	}
 
 	// --- Paged mode ---
@@ -654,11 +636,11 @@ class Fb2View extends FileView {
 		return Math.max(0, Math.floor((elLeft - bookLeft + 1) / w));
 	}
 
-	// Covers the reader for the duration of a reflow. Rebuilding the columns and
-	// giving the footnotes their room back moves the text dozens of times over,
-	// across as many frames, and every one of those was landing on screen. The
-	// cover is painted over the book rather than hiding it, because the layout
-	// underneath is measured throughout and must not be disturbed.
+	// Covers the reader for the duration of a resize burst: the window goes
+	// through several sizes as it animates, and the text jumped around on
+	// screen until it settled. The cover is painted over the book rather than
+	// hiding it, because the layout underneath is measured and must not be
+	// disturbed.
 	private beginReflow() {
 		if (this.reflowing) return;
 		this.reflowing = true;
@@ -687,18 +669,8 @@ class Fb2View extends FileView {
 			this.endReflow();
 			return;
 		}
-		// Take the old spacers out before measuring anything. They were cut for
-		// the old page height, and pagination measured against them lands the
-		// reader on a page that only ever existed halfway through the change.
-		this.notesPass++; // stop a layout still placing the old notes
-		this.clearFootnotes();
 		this.recomputePagination();
-		// The reader has their page back here, and everything below is filled in
-		// behind them. Laying the notes out again reflows the whole book once per
-		// page that carries one, which on a long book is seconds of work; holding
-		// a blank screen for that is far worse than the churn it was hiding.
 		this.endReflow();
-		this.layoutFootnotes();
 	}
 
 	// Toggle the paged/scroll CSS class and create or drop the page counter.
@@ -712,13 +684,9 @@ class Fb2View extends FileView {
 		} else {
 			this.counterEl?.remove();
 			this.counterEl = null;
-			// Scroll mode has no pages to sit at the foot of; the notes body at
-			// the end of the book becomes visible again instead.
-			this.notesPass++; // cancel a footnote layout still in flight
 			this.settleResizeDebounced.cancel();
 			this.resizing = false;
 			this.endReflow();
-			this.clearFootnotes();
 			// Drop the inline paged styles so scroll mode lays out normally.
 			this.bookEl?.setCssStyles({
 				transform: "",
@@ -762,10 +730,7 @@ class Fb2View extends FileView {
 		// accurate, but the page of the last block is a reliable backstop if a
 		// browser under-reports the overflowing multicol width.
 		const byScroll = Math.round(book.scrollWidth / w);
-		// The end-of-book notes body is hidden in paged mode (its notes are
-		// printed at the foot of their own pages), and a hidden element has no
-		// geometry — so the backstop measures the last block still on screen.
-		const last = this.lastContentBlock;
+		const last = this.lastBlock;
 		const byBlock = last ? this.pageOfElement(last) + 1 : 1;
 		this.pageCount = Math.max(1, byScroll, byBlock);
 		this.goToPage(this.pageOfAnchor(), false);
@@ -821,420 +786,6 @@ class Fb2View extends FileView {
 		this.goToPage(page, animate);
 		this.recordAnchor();
 		this.saveReadingPosition();
-	}
-
-	// --- Paged mode: footnotes at the foot of their page ---
-	//
-	// FB2 keeps footnote text in a separate <body name="notes"> at the end of
-	// the file and leaves only a superscript marker in the text. In paged mode
-	// each note is reprinted at the bottom of the page its marker landed on,
-	// the way a printed book does it, and the end-of-book notes body is hidden.
-	//
-	// How it works: a note block is an absolutely positioned child of the book
-	// layer — an absolutely positioned child of a multi-column container is not
-	// fragmented into columns, so it can be parked over any single page — and
-	// the room it needs is taken out of the text flow by a spacer inserted at
-	// the line where the text has to stop, breaking everything below it to the
-	// next page.
-	//
-	// Pages must be processed strictly in order: reserving room on page N
-	// reflows everything after it and so changes which page later markers land
-	// on. That also makes this the expensive part of paged mode, hence the
-	// slicing across frames and the debounce on resize.
-
-	// Content blocks that take part in pagination — everything except the
-	// hidden end-of-book notes body, which has no geometry to measure.
-	private contentBlocks(): HTMLElement[] {
-		return this.getScrollBlocks().filter((b) => !b.closest(".fb2-notes"));
-	}
-
-	private noteRefs(): HTMLElement[] {
-		if (!this.bookEl) return [];
-		// Only markers in the book text proper. A note's own text can carry
-		// markers too — in the hidden notes body they have no geometry and
-		// pageOfElement puts them on a junk page; in an already placed
-		// page-foot block they would breed notes for notes on every pass.
-		return Array.from(
-			this.bookEl.querySelectorAll<HTMLElement>(".fb2-note-ref[data-fb2-note]")
-		).filter((r) => !r.closest(".fb2-notes, .fb2-page-notes"));
-	}
-
-	private clearFootnotes() {
-		if (!this.bookEl) return;
-		for (const el of Array.from(
-			this.bookEl.querySelectorAll(".fb2-page-notes, .fb2-note-spacer")
-		)) {
-			// A spacer sits in the middle of a paragraph, between the two
-			// halves of a text node it was inserted into; normalize joins them
-			// back so repeated layouts do not shred the text into fragments.
-			const parent = el.parentElement;
-			el.remove();
-			parent?.normalize();
-		}
-	}
-
-	// Rebuilds every page-foot note block from scratch, in frame-sized slices,
-	// keeping the reader on the block their page opens with as it goes.
-	private layoutFootnotes() {
-		const book = this.bookEl;
-		if (!book) {
-			this.endReflow();
-			return;
-		}
-		const pass = ++this.notesPass; // cancels a layout still in flight
-		this.clearFootnotes();
-		if (!this.isPaged() || !this.noteSources.size) {
-			this.endReflow();
-			return;
-		}
-		// Neither list changes while the layout runs — a spacer and a note block
-		// match neither selector — so they are built once here rather than being
-		// re-queried, with a closest() per block, on every frame slice.
-		this.pumpFootnotes(
-			pass,
-			{ refs: this.noteRefs(), blocks: this.contentBlocks() },
-			0,
-			0
-		);
-	}
-
-	// Walks the markers in document order, one page per step, in ~12 ms slices
-	// so a book with hundreds of notes never freezes the UI.
-	private pumpFootnotes(
-		pass: number,
-		lists: { refs: HTMLElement[]; blocks: HTMLElement[] },
-		from: number,
-		retries: number
-	) {
-		if (pass !== this.notesPass || !this.bookEl) return;
-		const deadline = performance.now() + 12;
-		const { refs, blocks } = lists;
-		let i = from;
-		let retried = retries;
-		while (i < refs.length) {
-			const next = this.placeNotesForPage(refs, blocks, i, retried);
-			// placeNotesForPage returns the same index when the markers it was
-			// about to serve got pushed onto the next page: their notes follow
-			// them there. The retry counter guards against a pathological book
-			// making no progress at all.
-			retried = next === i ? retried + 1 : 0;
-			i = next;
-			if (performance.now() > deadline) {
-				// This runs with the reader watching, so it has to follow them.
-				// Spacers going in on earlier pages push the block their page opens
-				// with onto later pages, and the text would slide out from under
-				// them while the rest of the book is laid out. pageAnchor is that
-				// block, and the page count is recomputed on the way — the spacers
-				// grow it, and a page beyond the old count would be clamped back.
-				// A page turn in the middle of all this moves the anchor, so it is
-				// picked up rather than fought.
-				this.recomputePagination();
-				const win = this.contentEl.win;
-				const at = i;
-				const left = retried;
-				win.requestAnimationFrame(() =>
-					this.pumpFootnotes(pass, lists, at, left)
-				);
-				return;
-			}
-		}
-		// The spacers changed the page count; recompute it and settle the reader
-		// on the page their block ended up on.
-		this.recomputePagination();
-		this.endReflow();
-	}
-
-	// Prints the notes of the markers that sit on one page and reserves room
-	// for them. Returns the index of the first marker left to handle.
-	private placeNotesForPage(
-		refs: HTMLElement[],
-		blocks: HTMLElement[],
-		from: number,
-		retries: number
-	): number {
-		const book = this.bookEl;
-		const height = book?.clientHeight ?? 0;
-		if (!book || height <= 0 || this.pageWidth() <= 0) return refs.length;
-		const page = this.pageOfElement(refs[from]);
-		let to = from;
-		while (to < refs.length && this.pageOfElement(refs[to]) === page) to++;
-
-		let group = refs.slice(from, to);
-		// Two passes: the first reserves room, the second re-checks that doing
-		// so did not carry a marker off the page. Whatever the second pass
-		// produces is accepted — a page is never left half-done.
-		for (let attempt = 0; ; attempt++) {
-			const block = this.buildNoteBlock(group, page);
-			if (!block) return to; // none of these ids resolves to any text
-			const spacer = this.reserveSpace(blocks, page, block.offsetHeight);
-			const kept = group.filter((r) => this.pageOfElement(r) === page);
-			if (kept.length === group.length || attempt > 0 || retries >= 4) {
-				return to;
-			}
-			block.remove();
-			if (!kept.length) {
-				// Every marker moved to the next page, so its note belongs
-				// there too — this page is handled again from the same marker.
-				// The spacer stays: removing it would only bring the markers
-				// back and spin forever. The page ends a little early, which
-				// is what a printed book does when a note will not fit.
-				return from;
-			}
-			spacer?.remove();
-			group = kept;
-		}
-	}
-
-	// Builds the note block for one page and parks it over that page. Returns
-	// null if none of the markers resolves to note text.
-	private buildNoteBlock(group: HTMLElement[], page: number): HTMLElement | null {
-		const book = this.bookEl;
-		if (!book) return null;
-		const block = book.createDiv({ cls: "fb2-page-notes" });
-		let any = false;
-		for (const ref of group) {
-			const src = this.noteSources.get(ref.getAttribute("data-fb2-note") ?? "");
-			if (!src) continue;
-			const item = block.createDiv({ cls: "fb2-note" });
-			const marker = ref.textContent?.trim();
-			if (marker) item.createEl("sup", { text: marker, cls: "fb2-note-num" });
-			this.renderNoteBody(src, item);
-			any = true;
-		}
-		if (!any) {
-			block.remove();
-			return null;
-		}
-		// The block layer is one page-text wide, so the page's own left edge is
-		// simply its index times the page step.
-		block.setCssStyles({ left: `${page * this.pageWidth()}px` });
-		return block;
-	}
-
-	// Renders the text of one note. Notes are plain prose, so this deliberately
-	// bypasses the block renderer (and its render queue and TOC collection) and
-	// treats every child as a paragraph. The <title> is skipped: it usually
-	// holds nothing but the note's own number, which is printed as the marker.
-	private renderNoteBody(section: Element, container: HTMLElement) {
-		for (const child of Array.from(section.children)) {
-			const tag = child.localName;
-			if (tag === "title" || tag === "empty-line") continue;
-			if (tag === "section") {
-				this.renderNoteBody(child, container);
-				continue;
-			}
-			this.renderInlineChildren(child, container.createEl("p", {
-				cls: "fb2-note-p",
-			}));
-		}
-	}
-
-	// Where an element sits vertically on one given page, in pixels from the
-	// top of the page. A block that continues onto the next page is split into
-	// fragments, and getBoundingClientRect then reports the union of them —
-	// top 0, bottom the full page height — which says nothing about where the
-	// block actually starts. getClientRects returns the fragments separately,
-	// so the one standing on this page is picked out by its column.
-	private fragmentOnPage(
-		el: HTMLElement,
-		page: number
-	): { top: number; bottom: number } | null {
-		const book = this.bookEl;
-		const w = this.pageWidth();
-		if (!book || w <= 0) return null;
-		const origin = book.getBoundingClientRect();
-		for (const r of Array.from(el.getClientRects())) {
-			if (Math.floor((r.left - origin.left + 1) / w) !== page) continue;
-			return { top: r.top - origin.top, bottom: r.bottom - origin.top };
-		}
-		return null;
-	}
-
-	// Clears the bottom `height` pixels of a page for the note block: finds
-	// where the text first reaches into that band and inserts a spacer filling
-	// the rest of the column, so everything from there on breaks to the next
-	// page. The spacer goes inside the paragraph, at the line the text has to
-	// stop at, so a long paragraph loses only the lines that are in the way.
-	// Returns null when the page already has the room the note needs, or when
-	// nothing can be moved — in which case the note covers the last lines.
-	private reserveSpace(
-		blocks: HTMLElement[],
-		page: number,
-		height: number
-	): HTMLElement | null {
-		const book = this.bookEl;
-		if (!book) return null;
-		const pageHeight = book.clientHeight;
-		const limit = pageHeight - height; // text has to end above this
-		const first = this.firstBlockOnPage(blocks, page);
-		// Start one block early: the block before the first one of this page
-		// may flow in from the previous page and reach into the note band all
-		// the same. When no block starts on this page at all, the page is the
-		// middle of one long block, and that block is the only candidate.
-		const start =
-			first >= 0
-				? Math.max(0, first - 1)
-				: this.lastBlockBeforePage(blocks, page);
-		if (start < 0) return null;
-		// One pixel short of the column bottom: an exact fit is at the mercy of
-		// sub-pixel rounding, and a spacer a hair too tall spills onto the next
-		// page as a band of blank lines.
-		const spacerTo = (from: number) => {
-			const spacer = createDiv({ cls: "fb2-note-spacer" });
-			spacer.setCssStyles({ height: `${Math.max(1, pageHeight - from - 1)}px` });
-			return spacer;
-		};
-
-		for (let i = start; i < blocks.length; i++) {
-			if (this.pageOfElement(blocks[i]) > page) break;
-			const box = this.fragmentOnPage(blocks[i], page);
-			// The box of a block continuing onto the next page runs to the
-			// bottom of the column whatever its text does, so a block is only
-			// really in the way once breakPointInBlock says so.
-			if (!box || box.bottom <= limit) continue;
-			// A chapter heading is never broken mid-line; pushing it whole
-			// (the null path below) reads far better.
-			const at = blocks[i].hasClass("fb2-title")
-				? null
-				: this.breakPointInBlock(blocks[i], page, limit);
-			if (at === "clear") continue; // its text stops above the note
-
-			// Break the paragraph at the last line that still fits and put the
-			// spacer there, so only the lines in the way move to the next page.
-			// Pushing the whole paragraph instead would cost up to a page of
-			// blank space for the long paragraphs a novel is made of.
-			if (at) {
-				const spacer = spacerTo(at.top);
-				at.range.insertNode(spacer);
-				return spacer;
-			}
-
-			// No usable break point (an image, or a break at the very start of
-			// the block): push the whole block — unless it flows in from the
-			// previous page, where a spacer in front of it would reshape a page
-			// that is already done.
-			if (this.pageOfElement(blocks[i]) !== page) continue;
-			// A block whose own top already sits inside the reserved band
-			// leaves too little room, so step back until the note fits.
-			let victim = i;
-			let top = box.top;
-			while (victim > first && pageHeight - top < height) {
-				const prev = this.fragmentOnPage(blocks[victim - 1], page);
-				if (!prev) break;
-				victim--;
-				top = prev.top;
-			}
-			const spacer = spacerTo(top);
-			blocks[victim].parentElement?.insertBefore(spacer, blocks[victim]);
-			return spacer;
-		}
-		return null; // the page already has all the room the note needs
-	}
-
-	// The point inside a block where its text has to stop for the note to fit:
-	// the start of the first line on this page reaching below `limit`, as a
-	// collapsed range together with that line's top. Answers "clear" when the
-	// block's text already stops above the note, and null when there is no
-	// line to break at — no text at all (an image), or the break would land at
-	// the very start of the block — so the caller pushes the block instead.
-	//
-	// The line is found by bisecting the block's text, measuring the rect of
-	// one character at a time. Not a collapsed caret: at a line wrap a caret
-	// rect is ambiguous between the end of one line and the start of the next,
-	// and picking the wrong one strands a lone character above the spacer and
-	// spills a band of blank lines onto the next page. Position only ever
-	// grows along the text, so a dozen measurements are enough however long
-	// the paragraph is.
-	private breakPointInBlock(
-		el: HTMLElement,
-		page: number,
-		limit: number
-	): { range: Range; top: number } | "clear" | null {
-		const book = this.bookEl;
-		const w = this.pageWidth();
-		if (!book || w <= 0) return null;
-		const origin = book.getBoundingClientRect();
-		const doc = el.ownerDocument;
-		const walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-		const texts: Text[] = [];
-		let total = 0;
-		for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-			const t = n as Text;
-			if (!t.length) continue;
-			texts.push(t);
-			total += t.length;
-		}
-		if (!total) return null;
-		const flat = texts.map((t) => t.data).join("");
-
-		const range = doc.createRange();
-		// The rect of the single character at a text-wide offset.
-		const charRect = (offset: number) => {
-			let rest = offset;
-			for (const t of texts) {
-				if (rest < t.length) {
-					range.setStart(t, rest);
-					range.setEnd(t, rest + 1);
-					break;
-				}
-				rest -= t.length;
-			}
-			const r = range.getBoundingClientRect();
-			return {
-				empty: r.width === 0 && r.height === 0,
-				page: Math.floor((r.left - origin.left + 1) / w),
-				top: r.top - origin.top,
-				bottom: r.bottom - origin.top,
-			};
-		};
-		// Has the text reached past the room the note needs by this character?
-		// A space collapsed away at a line wrap has no rect of its own; it
-		// reaches exactly as far as the first drawn character after it.
-		const past = (offset: number) => {
-			for (let i = offset; i < total; i++) {
-				const m = charRect(i);
-				if (m.empty) continue;
-				return m.page > page || (m.page === page && m.bottom > limit);
-			}
-			return false;
-		};
-		if (!past(total - 1)) return "clear"; // the text never reaches that far
-
-		let lo = 0;
-		let hi = total - 1;
-		while (lo < hi) {
-			const mid = (lo + hi) >> 1;
-			if (past(mid)) hi = mid;
-			else lo = mid + 1;
-		}
-		// The first drawn character at or after `lo` starts the first line
-		// that has to move.
-		let c = lo;
-		let m = charRect(c);
-		while (m.empty && c + 1 < total) m = charRect(++c);
-		// It may sit on the next page already, in which case nothing this
-		// block puts on this page is in the note's way.
-		if (m.page !== page) return "clear";
-		// Don't split a word: a line that starts mid-word (a hyphenation
-		// break) re-wraps once its tail is cut away, and the measured geometry
-		// no longer holds. Step back to the space in front of the word so the
-		// whole word moves. A word too long to be worth moving (40+ chars —
-		// likely a URL) is split at the wrap after all: cutting an unbreakable
-		// word at its own wrap point re-wraps nothing.
-		let at = c;
-		while (at > 0 && at > c - 40 && !/\s/.test(flat[at - 1])) at--;
-		if (at > 0 && !/\s/.test(flat[at - 1])) at = c;
-		if (at === 0) return null; // nothing would be left above the break
-		let rest = at;
-		for (const t of texts) {
-			if (rest <= t.length) {
-				range.setStart(t, rest);
-				range.setEnd(t, rest);
-				break;
-			}
-			rest -= t.length;
-		}
-		return { range: range.cloneRange(), top: m.top };
 	}
 
 	// Index of the first block on a page. Blocks are in document order and
@@ -1293,11 +844,10 @@ class Fb2View extends FileView {
 	// all — a front page carrying just the cover — and the page number has to
 	// do.
 	//
-	// Only a deliberate move calls this. A reflow must not: laying the notes
-	// out pushes text down page by page, so the block a page opened with keeps
-	// being carried over from the page before, and re-reading the anchor after
-	// every step walked the reader backwards through the book — fifteen blocks
-	// over the course of one opening.
+	// Only a deliberate move calls this, never a reflow: a reflow puts the
+	// reader on whatever page the anchor block lands on, and re-reading the
+	// anchor off that page would let the position creep whenever the block
+	// the page opens with turns out to be a different one.
 	//
 	// Page math rather than viewport geometry, because pageOfElement compares
 	// two rects that carry the same transform: the answer holds even while a
@@ -1308,26 +858,21 @@ class Fb2View extends FileView {
 	// settleResize), or in a viewport with no area.
 	private recordAnchor() {
 		if (!this.positionRestored || this.resizing || !this.hasArea()) return;
-		const all = this.getScrollBlocks();
-		// The hidden end-of-book notes body has no geometry and would report
-		// nonsense pages, so the search runs over the blocks actually laid out;
-		// the answer is mapped back to an index into the full list, which is what
-		// a stored reading position is expressed in.
-		const laid = all.filter((b) => !b.closest(".fb2-notes"));
-		const first = laid.length ? this.firstBlockOnPage(laid, this.pageIndex) : -1;
+		const blocks = this.getScrollBlocks();
+		const first = blocks.length ? this.firstBlockOnPage(blocks, this.pageIndex) : -1;
 		if (first >= 0) {
-			this.pageAnchor = all.indexOf(laid[first]);
+			this.pageAnchor = first;
 			this.anchorSubPage = 0;
 			return;
 		}
-		const at = laid.length ? this.lastBlockBeforePage(laid, this.pageIndex) : -1;
+		const at = blocks.length ? this.lastBlockBeforePage(blocks, this.pageIndex) : -1;
 		if (at < 0) {
 			this.pageAnchor = -1;
 			this.anchorSubPage = this.pageIndex;
 			return;
 		}
-		this.pageAnchor = all.indexOf(laid[at]);
-		this.anchorSubPage = Math.max(0, this.pageIndex - this.pageOfElement(laid[at]));
+		this.pageAnchor = at;
+		this.anchorSubPage = Math.max(0, this.pageIndex - this.pageOfElement(blocks[at]));
 	}
 
 	private savePagedPosition(file = this.file) {
@@ -1348,27 +893,7 @@ class Fb2View extends FileView {
 			el.scrollIntoView({ behavior: "smooth", block: "start" });
 			return;
 		}
-		const target = this.pagedTarget(el);
-		if (target) this.turnToPage(this.pageOfElement(target), true);
-	}
-
-	// Where to land for a target in paged mode. Paged mode hides the
-	// end-of-book notes body, and a hidden element has no geometry, so
-	// pageOfElement would answer with a junk page for anything inside it. A link
-	// into a note is redirected to the marker referring to it, which sits on the
-	// page the note is printed under; a note nothing refers to has nowhere to go.
-	private pagedTarget(el: HTMLElement): HTMLElement | null {
-		if (!el.closest(".fb2-notes")) return el;
-		const id = el.closest("[data-fb2-id]")?.getAttribute("data-fb2-id");
-		if (!id || !this.bookEl) return null;
-		const refs = this.bookEl.querySelectorAll<HTMLElement>(
-			`.fb2-note-ref[data-fb2-note="${CSS.escape(id)}"]`
-		);
-		return (
-			Array.from(refs).find(
-				(r) => !r.closest(".fb2-notes, .fb2-page-notes")
-			) ?? null
-		);
+		this.turnToPage(this.pageOfElement(el), true);
 	}
 
 	// Called by the plugin after any settings change: switch layout if the
@@ -1386,11 +911,6 @@ class Fb2View extends FileView {
 		this.applyModeClass();
 		this.contentEl.win.requestAnimationFrame(() => {
 			if (this.isPaged()) {
-				// Same as a resize: cover the one reflow that repositions the
-				// reader, then fill the notes back in behind them.
-				this.beginReflow();
-				this.notesPass++;
-				this.clearFootnotes();
 				// Coming from scroll mode the anchor is the first block in view,
 				// at its start; staying in paged mode it is left as it is.
 				if (!wasPaged) {
@@ -1398,10 +918,6 @@ class Fb2View extends FileView {
 					this.anchorSubPage = 0;
 				}
 				this.recomputePagination();
-				this.endReflow();
-				// Font or spacing changes move every marker, so the page-foot
-				// notes have to be laid out again from scratch.
-				this.layoutFootnotes();
 			} else {
 				const blocks = this.getScrollBlocks();
 				const el = blocks[Math.min(Math.max(0, anchor), blocks.length - 1)];
@@ -1477,18 +993,9 @@ class Fb2View extends FileView {
 		this.collectToc = false;
 		if (titleInfo) this.renderTitleInfo(titleInfo, root);
 
-		this.noteSources.clear();
 		for (const body of Array.from(doc.querySelectorAll("FictionBook > body"))) {
 			// <body name="notes"> holds footnotes; keep their headings out of the TOC.
 			const isNotes = body.getAttribute("name") === "notes";
-			// Index the notes by id so paged mode can print each one at the foot
-			// of the page its marker landed on.
-			if (isNotes) {
-				for (const section of Array.from(body.querySelectorAll("section"))) {
-					const id = section.getAttribute("id");
-					if (id) this.noteSources.set(id, section);
-				}
-			}
 			const bodyEl = root.createDiv({
 				cls: isNotes ? "fb2-body fb2-notes" : "fb2-body",
 			});
@@ -1551,19 +1058,17 @@ class Fb2View extends FileView {
 			this.renderBlock(job.el, job.parent, job.depth);
 		}
 		this.collectToc = false;
-		const blocks = this.contentBlocks();
-		this.lastContentBlock = blocks[blocks.length - 1] ?? null;
+		const blocks = this.getScrollBlocks();
+		this.lastBlock = blocks[blocks.length - 1] ?? null;
 		this.plugin.updateToc(this);
 		if (!this.isPaged()) {
 			if (this.file) this.restoreScrollPosition(this.file.path);
 			return;
 		}
 		// The saved block becomes the anchor, and the first layout is made for
-		// it: the reader lands on its page right away and is then held on it
-		// while the page-foot notes are filled in below. A viewport with no area
-		// yet (a tab in the background, a tablet mid-rotation) lays nothing out;
-		// the resize observer lays the book out, for the same anchor, once it
-		// has one.
+		// it. A viewport with no area yet (a tab in the background, a tablet
+		// mid-rotation) lays nothing out; the resize observer lays the book out,
+		// for the same anchor, once it has one.
 		const pos = this.file ? this.plugin.getPosition(this.file.path) : undefined;
 		this.pageAnchor = this.resolveAnchor(pos?.index ?? 0);
 		// The pages into the block only mean anything for the block they were
@@ -1571,7 +1076,6 @@ class Fb2View extends FileView {
 		this.anchorSubPage = pos && this.pageAnchor === pos.index ? pos.sub ?? 0 : 0;
 		this.positionRestored = true;
 		this.recomputePagination();
-		this.layoutFootnotes();
 	}
 
 	// Title page: cover, title, authors, annotation.
@@ -1752,9 +1256,10 @@ class Fb2View extends FileView {
 				const href = getHref(el) ?? "";
 				// A footnote (type="note") renders as a plain superscript
 				// number with no link: the in-text reference and its back link
-				// navigated poorly, so footnotes are no longer clickable. Only
-				// the number is kept (any label like "note" is dropped), and it
-				// hugs the preceding word with no separating space.
+				// navigated poorly, so footnotes are not clickable; their text
+				// is in the notes body at the end of the book. Only the number
+				// is kept (any label like "note" is dropped), and it hugs the
+				// preceding word with no separating space.
 				if (el.getAttribute("type") === "note") {
 					const raw = (el.textContent ?? "").trim();
 					const marker = raw.match(/\d+/)?.[0] ?? raw;
@@ -1764,15 +1269,7 @@ class Fb2View extends FileView {
 					if (prev && prev.nodeType === Node.TEXT_NODE) {
 						prev.textContent = (prev.textContent ?? "").replace(/\s+$/, "");
 					}
-					const sup = parent.createEl("sup", {
-						text: marker,
-						cls: "fb2-note-ref",
-					});
-					// The target id is kept so paged mode can find the note text
-					// and print it at the foot of the page (see layoutFootnotes).
-					if (href.startsWith("#")) {
-						sup.setAttribute("data-fb2-note", href.slice(1));
-					}
+					parent.createEl("sup", { text: marker, cls: "fb2-note-ref" });
 					break;
 				}
 				const anchor = parent.createEl("a", { cls: "fb2-link" });

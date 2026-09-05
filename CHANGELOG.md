@@ -5,6 +5,18 @@ All notable changes to the FB2 Reader plugin are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- **Footnotes at the foot of the page.** Added in 0.3.0, the page-foot notes
+  reflowed the whole book once for every page carrying a note, on every
+  open, rotation and settings change — seconds of work on a long book, and
+  the source of most of the layout trouble since. They are gone. In both
+  modes the notes are printed as a section at the end of the book, as they
+  were before 0.3.0, and the markers in the text stay plain superscript
+  numbers with no link. The saved reading positions are unaffected.
+
 ## [0.3.3] - 2026-09-06
 
 ### Fixed
