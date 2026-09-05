@@ -5,6 +5,35 @@ All notable changes to the FB2 Reader plugin are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The reading position is kept again.** Since 0.3.1 opening a book could
+  put it back on the first page and save that as the new position. The
+  paged layout is laid out once the reader's size stops changing, and the
+  page to return to was remembered when the change began — while the book
+  was still opening, that was the front of the book, and the layout then
+  settled on it a moment after the saved position had been restored. On a
+  small or medium book that raced the same way on every open; on a tablet a
+  rotation passed through a size of zero, which measured every block as being
+  on the first page and overwrote the position with it. The position is now
+  the block the reader is on, set from the saved position before anything is
+  laid out; every layout puts the reader on whatever page that block lands
+  on, and the block itself is only read off the page when the reader turns
+  one or follows a link — never after a reflow, and never in a viewport with
+  no area.
+- **The page drifted backwards through the book.** Reading the position off
+  the page again after every layout step walked it back a block or so at a
+  time as the page-foot notes were filled in, so a book reopened a page or
+  two before where it was closed, and a rotation and back did not return to
+  the same page. A page in the middle of one long paragraph is now remembered
+  as that paragraph plus the pages into it, instead of falling back to the
+  page before.
+- **Positions are written out at once**, not two seconds after the last page
+  turn: on a phone or tablet the app can be suspended and dropped at any
+  moment, and a deferred write could leave a whole session unsaved.
+
 ## [0.3.2] - 2026-09-05
 
 ### Fixed

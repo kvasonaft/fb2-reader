@@ -58,6 +58,10 @@ interface RenderJob {
 // Saved reading position for one book.
 interface ReadingPosition {
 	index: number; // index of the block to resume reading from
+	// Paged mode: how many pages into that block the page was, for a page in
+	// the middle of one long block (a multi-page paragraph). Absent or 0: the
+	// page the block starts on.
+	sub?: number;
 	ts: number; // when it was saved (used to evict the oldest entries)
 }
 
@@ -331,18 +335,24 @@ class Fb2View extends FileView {
 	private bookEl: HTMLElement | null = null;
 	private pageIndex = 0;
 	private pageCount = 1;
-	// The block the current page opens with, recorded every time the reader
-	// settles on a page. Reflows are anchored on it; see pageAnchorIndex.
+	// The reading position: the block the reader's page opens with (-1 when
+	// nothing has started yet — the cover pages), and how many pages into that
+	// block the page is, for a page in the middle of one long block. It is what
+	// gets saved, and every reflow is anchored on it: the page is whatever page
+	// the block lands on after the layout. It is set from the saved position
+	// when a book opens and recorded from the layout only when the reader
+	// turns a page or follows a link — never after a reflow. See recordAnchor.
 	private pageAnchor = 0;
-	// The anchor held for the duration of a resize burst, or -1 between bursts,
-	// plus the size the last recompute was made for.
-	private resizeAnchor = -1;
+	private anchorSubPage = 0;
+	// True from the first resize event of a burst until the layout that settles
+	// it, plus the size the book was last laid out for, so that events which
+	// change nothing are ignored.
+	private resizing = false;
 	private lastWidth = -1;
 	private lastHeight = -1;
-	// While a book opens the reader sits at the start waiting for layout, and
-	// saving would clobber the real position with 0. Once the saved position
-	// has been applied, saving the start becomes legitimate — the reader may
-	// have gone back to the beginning on purpose, and that should stick.
+	// Set once the book is rendered and the saved position has been applied.
+	// Until then the reader sits at the start waiting for layout, and saving
+	// would clobber the real position with 0.
 	private positionRestored = false;
 	private counterEl: HTMLElement | null = null;
 	private resizeObserver: ResizeObserver | null = null;
@@ -353,10 +363,6 @@ class Fb2View extends FileView {
 	// Last block of the book proper (the notes body excluded), cached because
 	// recomputePagination measures against it every time it runs.
 	private lastContentBlock: HTMLElement | null = null;
-	// Set while a book is opening and its saved position has not been applied
-	// yet. A reflow starting in the middle cancels the opening footnote layout,
-	// and would drop the restore with it; it is picked up here instead.
-	private pendingRestore: (() => void) | null = null;
 	// Lays the book out for its new size, once the size has stopped changing.
 	private settleResizeDebounced = debounce(() => this.settleResize(), 150);
 	// True while the reader is covered for a reflow; see beginReflow.
@@ -392,23 +398,32 @@ class Fb2View extends FileView {
 		// Re-paginate when the reader area changes size (window resize, sidebar
 		// toggle, popout, tablet rotation). Cheap no-op in scroll mode.
 		this.resizeObserver = new ResizeObserver(() => {
-			// observe() fires once on its own, before any book is open.
-			if (!this.isPaged() || !this.bookEl) return;
+			// observe() fires once on its own, before any book is open. A book
+			// still opening is laid out for whatever size it has once it is
+			// rendered (see pumpRenderQueue), so nothing is done for it here
+			// either — its events used to start a burst anchored on the front of
+			// the book, which then settled on top of the restored position.
+			if (!this.isPaged() || !this.bookEl || !this.positionRestored) return;
 			const w = this.contentEl.clientWidth;
 			const h = this.contentEl.clientHeight;
-			// Rotating a tablet takes the reader through sizes that mean nothing,
-			// a zero among them, and lastWidth/lastHeight hold the size the book
-			// was actually laid out for, so a size it already fits is ignored.
-			if (w <= 0 || h <= 0) return;
+			// lastWidth/lastHeight hold the size the book was actually laid out
+			// for, so a size it already fits is ignored.
 			if (w === this.lastWidth && h === this.lastHeight) return;
 			// Nothing is laid out here. A rotation fires this several times as the
 			// window animates, and every layout was landing on screen: each event
 			// reflowed the whole book, and the footnote pass then reflowed it again
 			// page by page over dozens of frames, all of it in front of the reader.
-			// Instead the page the reader was on is remembered, the reader is
-			// covered, and it is all laid out once the size stops changing.
-			if (this.resizeAnchor < 0) this.resizeAnchor = this.pageAnchor;
-			this.beginReflow();
+			// Instead the reader is covered and the book is laid out once the size
+			// stops changing, anchored on the block they are on (pageAnchor). A
+			// footnote layout still in flight is stopped: it would be measuring a
+			// viewport that means nothing. Rotating a tablet takes the reader
+			// through a zero size too; that starts a burst like any other, and
+			// settleResize leaves the book alone until it has an area again.
+			if (!this.resizing) {
+				this.resizing = true;
+				this.notesPass++;
+				this.beginReflow();
+			}
 			this.settleResizeDebounced();
 		});
 		this.resizeObserver.observe(this.contentEl);
@@ -453,6 +468,8 @@ class Fb2View extends FileView {
 		const pass = ++this.loadPass;
 		const container = this.contentEl;
 		container.empty();
+		this.settleResizeDebounced.cancel();
+		this.resizing = false;
 		this.endReflow(); // a cover must not carry over into the next book
 		container.addClass("fb2-reader"); // CSS class the styles target
 		this.tocItems = [];
@@ -483,11 +500,10 @@ class Fb2View extends FileView {
 		// plugin (so it opens the TOC panel). Rendering is sliced across
 		// frames; the reading position is restored when the queue drains.
 		this.collectBinaries(doc);
-		this.pendingRestore = null;
 		this.pageIndex = 0;
 		this.pageCount = 1;
 		this.pageAnchor = 0;
-		this.resizeAnchor = -1;
+		this.anchorSubPage = 0;
 		this.lastWidth = -1;
 		this.lastHeight = -1;
 		this.positionRestored = false;
@@ -506,7 +522,6 @@ class Fb2View extends FileView {
 		this.settleResizeDebounced.cancel();
 		this.endReflow();
 		this.renderQueue = [];
-		this.pendingRestore = null;
 		this.noteSources.clear();
 		this.saveReadingPosition(file);
 		this.plugin.clearTocFor(this);
@@ -520,7 +535,8 @@ class Fb2View extends FileView {
 		this.pageIndex = 0;
 		this.pageCount = 1;
 		this.pageAnchor = 0;
-		this.resizeAnchor = -1;
+		this.anchorSubPage = 0;
+		this.resizing = false;
 		this.lastWidth = -1;
 		this.lastHeight = -1;
 		this.positionRestored = false;
@@ -552,43 +568,57 @@ class Fb2View extends FileView {
 	// Save the position as a block index. Both modes store it the same way, so
 	// switching between scroll and paged keeps the reader's place.
 	private saveReadingPosition(file = this.file) {
-		if (!file) return;
+		// Before the restore the reader has not been placed anywhere yet, and
+		// what is on screen is just the book still loading.
+		if (!file || !this.positionRestored) return;
 		if (this.isPaged()) {
 			this.savePagedPosition(file);
 			return;
 		}
-		// scrollTop 0 before the restore is just the book still loading.
-		if (this.contentEl.scrollTop <= 0 && !this.positionRestored) return;
+		// A reader with no area (a tab in the background) has nothing in view,
+		// and measuring it would answer with the front of the book.
+		if (!this.hasArea()) return;
 		this.plugin.setPosition(file.path, this.firstVisibleScrollIndex());
 	}
 
-	// Restore the position: scroll to (or turn to the page of) the saved block.
-	private restoreReadingPosition(path: string) {
+	// Whether the reader has any area to lay a book out in. A tab in the
+	// background and a tablet in the middle of rotating both report none, and
+	// nothing measured in either means anything.
+	private hasArea(): boolean {
+		return this.contentEl.clientWidth > 0 && this.contentEl.clientHeight > 0;
+	}
+
+	// Restore the position in scroll mode: scroll to the saved block. Paged
+	// mode has no separate restore step — the saved block becomes the anchor
+	// the very first layout is made for; see pumpRenderQueue.
+	private restoreScrollPosition(path: string) {
 		const pos = this.plugin.getPosition(path);
 		// By the next animation frame the browser has laid out all elements.
 		// contentEl.win is the window owning this view — the correct one
 		// when the reader lives in a popout window.
 		this.contentEl.win.requestAnimationFrame(() => {
-			this.positionRestored = true; // saving the start is allowed from here
-			const blocks = this.getScrollBlocks();
-			if (this.isPaged()) {
-				const idx = pos ? Math.min(pos.index, blocks.length - 1) : 0;
-				const target = blocks[Math.max(0, idx)];
-				// A position saved inside the notes body (only reachable in
-				// scroll mode, where that body is visible) has no page of its
-				// own: paged mode prints those notes under their own pages and
-				// hides the body, so fall back to the end of the book.
-				if (target?.closest(".fb2-notes")) {
-					this.goToPage(this.pageCount - 1, false);
-					return;
-				}
-				this.goToPage(target ? this.pageOfElement(target) : 0, false);
-				return;
-			}
+			this.positionRestored = true; // saving is allowed from here
 			if (!pos || pos.index <= 0) return;
+			const blocks = this.getScrollBlocks();
 			const target = blocks[Math.min(pos.index, blocks.length - 1)];
 			target?.scrollIntoView({ block: "start" });
 		});
+	}
+
+	// Maps a block index — a saved position, or the first block in view when
+	// the mode flips — onto a block the paged layout can put on a page: clamped
+	// to the book, and moved to the end of the book proper when it points into
+	// the notes body. A position inside that body is only ever saved in scroll
+	// mode, where the body is visible; paged mode prints those notes under
+	// their own pages and hides the body, so it has no page of its own.
+	// Answers -1 for a book with no blocks at all.
+	private resolveAnchor(index: number): number {
+		const blocks = this.getScrollBlocks();
+		if (!blocks.length) return -1;
+		const idx = Math.max(0, Math.min(index, blocks.length - 1));
+		if (!blocks[idx].closest(".fb2-notes")) return idx;
+		const last = this.lastContentBlock;
+		return last ? Math.max(0, blocks.indexOf(last)) : 0;
 	}
 
 	// --- Paged mode ---
@@ -644,20 +674,25 @@ class Fb2View extends FileView {
 	// Lays the book out for the size it now has. Deferred from the resize
 	// observer, so it runs once per burst however many events the burst had.
 	private settleResize() {
-		const anchor = this.resizeAnchor;
-		this.resizeAnchor = -1;
+		this.resizing = false;
 		if (!this.isPaged() || !this.bookEl) {
 			this.endReflow();
 			return;
 		}
+		// Recorded even when it is zero: the book has to be laid out again when
+		// the size comes back, whether or not it is the size it had before.
 		this.lastWidth = this.contentEl.clientWidth;
 		this.lastHeight = this.contentEl.clientHeight;
+		if (!this.hasArea()) {
+			this.endReflow();
+			return;
+		}
 		// Take the old spacers out before measuring anything. They were cut for
 		// the old page height, and pagination measured against them lands the
 		// reader on a page that only ever existed halfway through the change.
 		this.notesPass++; // stop a layout still placing the old notes
 		this.clearFootnotes();
-		this.recomputePagination(anchor);
+		this.recomputePagination();
 		// The reader has their page back here, and everything below is filled in
 		// behind them. Laying the notes out again reflows the whole book once per
 		// page that carries one, which on a long book is seconds of work; holding
@@ -681,6 +716,7 @@ class Fb2View extends FileView {
 			// the end of the book becomes visible again instead.
 			this.notesPass++; // cancel a footnote layout still in flight
 			this.settleResizeDebounced.cancel();
+			this.resizing = false;
 			this.endReflow();
 			this.clearFootnotes();
 			// Drop the inline paged styles so scroll mode lays out normally.
@@ -695,10 +731,9 @@ class Fb2View extends FileView {
 		}
 	}
 
-	// Measure the layout and update the page count. `anchor` is the index of a
-	// block to keep the page pointing at across the reflow, or -1 to stay on the
-	// page number the reader is already on.
-	private recomputePagination(anchor: number) {
+	// Measure the layout, update the page count and put the reader on the page
+	// their anchor block landed on.
+	private recomputePagination() {
 		const book = this.bookEl;
 		if (!book || !this.isPaged()) return;
 		const w = this.contentEl.clientWidth; // viewport width = one page step
@@ -706,7 +741,9 @@ class Fb2View extends FileView {
 		// tablet reports one. This used to set pageCount to 1, which then clamped
 		// the next page turn to the very start of the book; leaving the last good
 		// figures alone until the size settles is what keeps the reader in place.
-		if (w <= 0 || this.contentEl.clientHeight <= 0) return;
+		if (!this.hasArea()) return;
+		this.lastWidth = w;
+		this.lastHeight = this.contentEl.clientHeight;
 		// Build columns one page-text wide (viewport minus symmetric margins),
 		// separated by a gap of twice the margin. The book layer is centered
 		// (margin: 0 auto), so each page sits with equal side margins and the
@@ -731,29 +768,58 @@ class Fb2View extends FileView {
 		const last = this.lastContentBlock;
 		const byBlock = last ? this.pageOfElement(last) + 1 : 1;
 		this.pageCount = Math.max(1, byScroll, byBlock);
-		let page = this.pageIndex;
-		if (anchor >= 0) {
-			const blocks = this.getScrollBlocks();
-			const el = blocks[Math.min(anchor, blocks.length - 1)];
-			page = el ? this.pageOfElement(el) : 0;
-		}
-		this.goToPage(page, false);
+		this.goToPage(this.pageOfAnchor(), false);
 	}
 
-	// Slide to a page (clamped to the valid range).
+	// The page the anchor is on in the current layout: the page its block
+	// starts on, plus the pages into the block the reader was, held within the
+	// block — in a narrower or wider layout it spans a different number of
+	// pages. An anchor of -1 is the front of the book, where the page number
+	// recorded with it has to do.
+	private pageOfAnchor(): number {
+		if (this.pageAnchor < 0) return this.anchorSubPage;
+		const blocks = this.getScrollBlocks();
+		const el = blocks[Math.min(this.pageAnchor, blocks.length - 1)];
+		if (!el) return 0;
+		const first = this.pageOfElement(el);
+		if (this.anchorSubPage <= 0) return first;
+		return Math.min(first + this.anchorSubPage, this.lastPageOfElement(el));
+	}
+
+	// The page an element ends on. A block that continues onto later pages is
+	// split into one fragment per column, and getClientRects lists them all.
+	private lastPageOfElement(el: HTMLElement): number {
+		const w = this.pageWidth();
+		if (!this.bookEl || w <= 0) return 0;
+		const bookLeft = this.bookEl.getBoundingClientRect().left;
+		let last = this.pageOfElement(el);
+		for (const r of Array.from(el.getClientRects())) {
+			last = Math.max(last, Math.floor((r.left - bookLeft + 1) / w));
+		}
+		return last;
+	}
+
+	// Slide to a page (clamped to the valid range). Display only: the anchor
+	// is left alone, so a reflow can call this freely — the block the reader
+	// is on does not change because the page it sits on did. Nothing is done
+	// in a viewport with no area: the page step is zero there, so the slide
+	// would land on the front of the book.
 	private goToPage(page: number, animate: boolean) {
-		this.pageIndex = Math.max(0, Math.min(page, this.pageCount - 1));
 		const book = this.bookEl;
-		if (!book) return;
+		if (!book || !this.hasArea()) return;
+		this.pageIndex = Math.max(0, Math.min(page, this.pageCount - 1));
 		book.setCssStyles({
 			transition: animate ? "transform 0.18s ease" : "none",
 			transform: `translateX(${-this.pageIndex * this.pageWidth()}px)`,
 		});
-		// Record the anchor here, where the columns and the viewport agree about
-		// their width. Once a resize has begun they do not, and no measurement
-		// taken before the reflow means anything.
-		this.pageAnchor = this.pageAnchorIndex();
 		this.updateCounter();
+	}
+
+	// A deliberate move to a page — a page turn, a link — which is where the
+	// reading position changes: the anchor is read off the new page and saved.
+	private turnToPage(page: number, animate: boolean) {
+		this.goToPage(page, animate);
+		this.recordAnchor();
 		this.saveReadingPosition();
 	}
 
@@ -808,23 +874,16 @@ class Fb2View extends FileView {
 	}
 
 	// Rebuilds every page-foot note block from scratch, in frame-sized slices,
-	// keeping the reader on the block their page opens with as it goes. Without
-	// `onDone` that is where they are left; with it, the caller decides.
-	private layoutFootnotes(onDone?: () => void) {
+	// keeping the reader on the block their page opens with as it goes.
+	private layoutFootnotes() {
 		const book = this.bookEl;
 		if (!book) {
 			this.endReflow();
 			return;
 		}
 		const pass = ++this.notesPass; // cancels a layout still in flight
-		// A book still opening has its saved position waiting on the end of this
-		// layout. Bumping the pass above just cancelled that layout, so whatever
-		// cancelled it inherits the restore rather than leaving the reader at the
-		// front of the book.
-		const done = onDone ?? this.pendingRestore ?? undefined;
 		this.clearFootnotes();
 		if (!this.isPaged() || !this.noteSources.size) {
-			done?.();
 			this.endReflow();
 			return;
 		}
@@ -835,8 +894,7 @@ class Fb2View extends FileView {
 			pass,
 			{ refs: this.noteRefs(), blocks: this.contentBlocks() },
 			0,
-			0,
-			done
+			0
 		);
 	}
 
@@ -846,8 +904,7 @@ class Fb2View extends FileView {
 		pass: number,
 		lists: { refs: HTMLElement[]; blocks: HTMLElement[] },
 		from: number,
-		retries: number,
-		onDone?: () => void
+		retries: number
 	) {
 		if (pass !== this.notesPass || !this.bookEl) return;
 		const deadline = performance.now() + 12;
@@ -867,30 +924,24 @@ class Fb2View extends FileView {
 				// Spacers going in on earlier pages push the block their page opens
 				// with onto later pages, and the text would slide out from under
 				// them while the rest of the book is laid out. pageAnchor is that
-				// block and goToAnchor refreshes it, so a page turn in the middle of
-				// all this is picked up rather than fought.
-				this.goToAnchor(this.pageAnchor);
+				// block, and the page count is recomputed on the way — the spacers
+				// grow it, and a page beyond the old count would be clamped back.
+				// A page turn in the middle of all this moves the anchor, so it is
+				// picked up rather than fought.
+				this.recomputePagination();
 				const win = this.contentEl.win;
 				const at = i;
 				const left = retried;
 				win.requestAnimationFrame(() =>
-					this.pumpFootnotes(pass, lists, at, left, onDone)
+					this.pumpFootnotes(pass, lists, at, left)
 				);
 				return;
 			}
 		}
 		// The spacers changed the page count; recompute it and settle the reader
 		// on the page their block ended up on.
-		this.recomputePagination(-1);
-		if (onDone) onDone();
-		else this.goToAnchor(this.pageAnchor);
+		this.recomputePagination();
 		this.endReflow();
-	}
-
-	// Put the reader back on the block a reflow was anchored to.
-	private goToAnchor(anchor: number) {
-		const el = this.getScrollBlocks()[anchor];
-		if (el) this.goToPage(this.pageOfElement(el), false);
 	}
 
 	// Prints the notes of the markers that sit on one page and reserves room
@@ -1224,56 +1275,67 @@ class Fb2View extends FileView {
 	}
 
 	private nextPage() {
-		this.goToPage(this.pageIndex + 1, true);
+		this.turnToPage(this.pageIndex + 1, true);
 	}
 
 	private prevPage() {
-		this.goToPage(this.pageIndex - 1, true);
+		this.turnToPage(this.pageIndex - 1, true);
 	}
 
-	// Index of the block the current page OPENS with — the first one that starts
-	// on it, not the first one visible on it. The distinction is the whole point:
-	// a page normally opens in the middle of a paragraph carried over from the
-	// page before, and pageOfElement answers for that paragraph with the page it
-	// starts on, which is the previous one. Anchoring a reflow on the first
-	// visible block therefore walked the reader a page backwards every time, and
-	// an orientation change reflows several times over. Anchoring on the block
-	// the page starts with is a fixed point: the page it reports is the page it
-	// opens, so repeated reflows land in the same place.
+	// Reads the anchor off the current page: the block the page OPENS with —
+	// the first one that starts on it, not the first one visible on it. A page
+	// normally opens in the middle of a paragraph carried over from the page
+	// before, and pageOfElement answers for that paragraph with the page it
+	// starts on, which is the previous one; anchoring on the first visible
+	// block would put every reflow a page back. When no block starts on the
+	// page it is the middle of one long block, which is then the anchor, with
+	// the number of pages into it recorded alongside; or nothing has started at
+	// all — a front page carrying just the cover — and the page number has to
+	// do.
 	//
-	// Page math rather than viewport geometry, because pageOfElement compares two
-	// rects that carry the same transform: the answer holds even while a page
-	// turn is still animating, where reading the viewport would give the page
-	// being slid away from.
+	// Only a deliberate move calls this. A reflow must not: laying the notes
+	// out pushes text down page by page, so the block a page opened with keeps
+	// being carried over from the page before, and re-reading the anchor after
+	// every step walked the reader backwards through the book — fifteen blocks
+	// over the course of one opening.
 	//
-	// Answers -1 when the page has no block to hold on to, which callers read as
-	// "stay on the page number you are on".
-	private pageAnchorIndex(): number {
+	// Page math rather than viewport geometry, because pageOfElement compares
+	// two rects that carry the same transform: the answer holds even while a
+	// page turn is still animating, where reading the viewport would give the
+	// page being slid away from. Nothing is read while the layout cannot be
+	// trusted: before the book has been placed, in the middle of a resize
+	// (the columns and the viewport disagree about their width until
+	// settleResize), or in a viewport with no area.
+	private recordAnchor() {
+		if (!this.positionRestored || this.resizing || !this.hasArea()) return;
 		const all = this.getScrollBlocks();
 		// The hidden end-of-book notes body has no geometry and would report
 		// nonsense pages, so the search runs over the blocks actually laid out;
 		// the answer is mapped back to an index into the full list, which is what
 		// a stored reading position is expressed in.
 		const laid = all.filter((b) => !b.closest(".fb2-notes"));
-		if (!laid.length) return -1;
-		const first = this.firstBlockOnPage(laid, this.pageIndex);
-		// No block starts on this page. Either it is the middle of one long block,
-		// which is then the only anchor there is, or nothing has started yet at all
-		// — a front page carrying just the cover, where the page number has to do.
-		const at =
-			first >= 0 ? first : this.lastBlockBeforePage(laid, this.pageIndex);
-		if (at < 0) return -1;
-		return Math.max(0, all.indexOf(laid[at]));
+		const first = laid.length ? this.firstBlockOnPage(laid, this.pageIndex) : -1;
+		if (first >= 0) {
+			this.pageAnchor = all.indexOf(laid[first]);
+			this.anchorSubPage = 0;
+			return;
+		}
+		const at = laid.length ? this.lastBlockBeforePage(laid, this.pageIndex) : -1;
+		if (at < 0) {
+			this.pageAnchor = -1;
+			this.anchorSubPage = this.pageIndex;
+			return;
+		}
+		this.pageAnchor = all.indexOf(laid[at]);
+		this.anchorSubPage = Math.max(0, this.pageIndex - this.pageOfElement(laid[at]));
 	}
 
 	private savePagedPosition(file = this.file) {
 		if (!file) return;
-		// Page 0 before the restore is just the book still loading.
-		if (this.pageIndex <= 0 && !this.positionRestored) return;
 		// No anchor means nothing has started on this page or before it, so the
 		// reader is on the cover pages at the very front: record the beginning.
-		const idx = Math.max(0, this.pageAnchor);
-		if (idx > 0 || this.positionRestored) this.plugin.setPosition(file.path, idx);
+		if (this.pageAnchor < 0) this.plugin.setPosition(file.path, 0);
+		else this.plugin.setPosition(file.path, this.pageAnchor, this.anchorSubPage);
 	}
 
 	private updateCounter() {
@@ -1287,7 +1349,7 @@ class Fb2View extends FileView {
 			return;
 		}
 		const target = this.pagedTarget(el);
-		if (target) this.goToPage(this.pageOfElement(target), true);
+		if (target) this.turnToPage(this.pageOfElement(target), true);
 	}
 
 	// Where to land for a target in paged mode. Paged mode hides the
@@ -1313,25 +1375,36 @@ class Fb2View extends FileView {
 	// reading mode flipped, and re-paginate (metrics may have changed).
 	onSettingsChanged() {
 		if (!this.bookEl) return;
+		// A book still rendering is laid out for the current settings once it is
+		// rendered (see pumpRenderQueue); only the mode class is needed now.
+		if (!this.positionRestored) {
+			this.applyModeClass();
+			return;
+		}
 		const wasPaged = this.contentEl.hasClass("fb2-paged");
 		const anchor = wasPaged ? this.pageAnchor : this.firstVisibleScrollIndex();
 		this.applyModeClass();
 		this.contentEl.win.requestAnimationFrame(() => {
-			const blocks = this.getScrollBlocks();
-			const el = blocks[Math.min(anchor, blocks.length - 1)];
 			if (this.isPaged()) {
 				// Same as a resize: cover the one reflow that repositions the
 				// reader, then fill the notes back in behind them.
 				this.beginReflow();
 				this.notesPass++;
 				this.clearFootnotes();
-				this.recomputePagination(-1);
-				this.goToPage(el ? this.pageOfElement(el) : 0, false);
+				// Coming from scroll mode the anchor is the first block in view,
+				// at its start; staying in paged mode it is left as it is.
+				if (!wasPaged) {
+					this.pageAnchor = this.resolveAnchor(anchor);
+					this.anchorSubPage = 0;
+				}
+				this.recomputePagination();
 				this.endReflow();
 				// Font or spacing changes move every marker, so the page-foot
 				// notes have to be laid out again from scratch.
 				this.layoutFootnotes();
 			} else {
+				const blocks = this.getScrollBlocks();
+				const el = blocks[Math.min(Math.max(0, anchor), blocks.length - 1)];
 				el?.scrollIntoView({ block: "start" });
 			}
 		});
@@ -1481,19 +1554,24 @@ class Fb2View extends FileView {
 		const blocks = this.contentBlocks();
 		this.lastContentBlock = blocks[blocks.length - 1] ?? null;
 		this.plugin.updateToc(this);
-		const restore = () => {
-			this.pendingRestore = null;
-			if (this.file) this.restoreReadingPosition(this.file.path);
-		};
 		if (!this.isPaged()) {
-			restore();
+			if (this.file) this.restoreScrollPosition(this.file.path);
 			return;
 		}
-		this.pendingRestore = restore;
-		this.recomputePagination(-1);
-		// The saved position is restored only once the notes have taken their
-		// room: they shift every page after them along.
-		this.layoutFootnotes(restore);
+		// The saved block becomes the anchor, and the first layout is made for
+		// it: the reader lands on its page right away and is then held on it
+		// while the page-foot notes are filled in below. A viewport with no area
+		// yet (a tab in the background, a tablet mid-rotation) lays nothing out;
+		// the resize observer lays the book out, for the same anchor, once it
+		// has one.
+		const pos = this.file ? this.plugin.getPosition(this.file.path) : undefined;
+		this.pageAnchor = this.resolveAnchor(pos?.index ?? 0);
+		// The pages into the block only mean anything for the block they were
+		// recorded for.
+		this.anchorSubPage = pos && this.pageAnchor === pos.index ? pos.sub ?? 0 : 0;
+		this.positionRestored = true;
+		this.recomputePagination();
+		this.layoutFootnotes();
 	}
 
 	// Title page: cover, title, authors, annotation.
@@ -1834,8 +1912,6 @@ export default class Fb2ReaderPlugin extends Plugin {
 	private positions: Record<string, ReadingPosition> = {};
 	// Deferred saving: write to disk at most once per 2 seconds.
 	private saveDataDebounced = debounce(() => this.saveData(this.data), 2000, true);
-	// Same for positions, which change on every scroll.
-	private savePositionsDebounced = debounce(() => this.savePositions(), 2000, true);
 
 	async onload() {
 		// Load persisted data (data.json). Object.assign layers the stored
@@ -1910,7 +1986,6 @@ export default class Fb2ReaderPlugin extends Plugin {
 		// is gone would overwrite what we are about to put on disk.
 		this.saveDataDebounced.cancel();
 		void this.saveData(this.data);
-		this.savePositionsDebounced.cancel();
 		this.savePositions();
 		for (const body of this.readerBodies()) {
 			body.style.removeProperty("--fb2-font-family");
@@ -1985,10 +2060,19 @@ export default class Fb2ReaderPlugin extends Plugin {
 		return this.positions[path];
 	}
 
-	setPosition(path: string, index: number) {
-		this.positions[path] = { index, ts: Date.now() };
+	// Records where the reader is in a book and writes it out at once if they
+	// moved. The write is a synchronous localStorage call — cheap, and every
+	// caller is already paced (a page turn, a scroll settling) — and it must
+	// not wait: on a phone or tablet the app can be suspended and dropped at
+	// any moment, and a deferred write was a reading session's last position
+	// simply never landing.
+	setPosition(path: string, index: number, sub = 0) {
+		const prev = this.positions[path];
+		this.positions[path] = { index, sub, ts: Date.now() };
+		// Same place; only the time moved.
+		if (prev?.index === index && (prev.sub ?? 0) === sub) return;
 		this.prunePositions();
-		this.savePositionsDebounced();
+		this.savePositions();
 	}
 
 	// Follows a rename: moves the entry of the file itself, and — since a folder
@@ -2011,7 +2095,7 @@ export default class Fb2ReaderPlugin extends Plugin {
 		}
 		if (!changed) return;
 		this.positions = moved;
-		this.savePositionsDebounced();
+		this.savePositions();
 	}
 
 	// Reads the positions saved on this device. Versions up to 0.2.0 kept them
